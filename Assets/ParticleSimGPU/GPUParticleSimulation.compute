@@ -1,0 +1,461 @@
+#pragma kernel InitParticles
+#pragma kernel AssignParticlesToGrid
+#pragma kernel CountParticlesPerCell
+#pragma kernel SortParticlesByCell
+#pragma kernel CalculateForces
+#pragma kernel IntegrateParticles
+#pragma kernel ResetGrid
+
+// Particle data structure (must match C# struct layout)
+struct ParticleData
+{
+    float3 position;
+    float3 velocity;
+    int typeIndex;
+    float mass;
+    float radius;
+    float padding;
+};
+
+// Type data structure
+struct TypeData
+{
+    float mass;
+    float radius;
+    float4 color;
+};
+
+// Grid cell entry
+struct GridEntry
+{
+    int cellIndex;
+    int particleIndex;
+};
+
+// Particle buffers
+RWStructuredBuffer<ParticleData> Particles;
+StructuredBuffer<TypeData> ParticleTypes;
+StructuredBuffer<float> InteractionMatrix;
+
+// Grid buffers
+RWStructuredBuffer<GridEntry> ParticleGrid;
+RWStructuredBuffer<int> GridCounts;
+RWStructuredBuffer<int> GridOffsets;
+
+// Initialization buffers
+StructuredBuffer<int> TypeCounts;
+StructuredBuffer<int> TypeStartIndices;
+
+// Simulation parameters
+int ParticleCount;
+int MaxParticleCount;
+int ActiveParticleCount;
+int TypeCount;
+float DeltaTime;
+float3 SimulationBounds;
+float3 HalfBounds;
+float Dampening;
+float InteractionStrength;
+float MinDistance;
+float BounceForce;
+float MaxForce;
+float MaxVelocity;
+float InteractionRadius;
+float CollisionElasticity;
+
+// Grid parameters
+float CellSize;
+int GridSizeX;
+int GridSizeY;
+int GridSizeZ;
+int TotalGridCells;
+
+// LOD parameters
+bool EnableLOD;
+int LODLevels;
+float LODFactor;
+float4x4 CameraToWorldMatrix;
+float3 CameraPosition;
+
+// Random number functions
+uint wang_hash(uint seed)
+{
+    seed = (seed ^ 61) ^ (seed >> 16);
+    seed *= 9;
+    seed = seed ^ (seed >> 4);
+    seed *= 0x27d4eb2d;
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+
+float rand(inout uint state)
+{
+    state = wang_hash(state);
+    return float(state) / 4294967296.0;
+}
+
+// Grid cell calculation
+int3 WorldToCell(float3 worldPos)
+{
+    float3 normalizedPos = worldPos + HalfBounds;
+    return int3(
+        clamp(int(normalizedPos.x / CellSize), 0, GridSizeX - 1),
+        clamp(int(normalizedPos.y / CellSize), 0, GridSizeY - 1),
+        clamp(int(normalizedPos.z / CellSize), 0, GridSizeZ - 1)
+    );
+}
+
+int CellToIndex(int3 cell)
+{
+    return cell.x + cell.y * GridSizeX + cell.z * GridSizeX * GridSizeY;
+}
+
+int GetCellIndex(float3 worldPos)
+{
+    return CellToIndex(WorldToCell(worldPos));
+}
+
+/////////////////////// KERNELS ///////////////////////
+
+// Initialize particles
+[numthreads(64, 1, 1)]
+void InitParticles(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= ParticleCount)
+        return;
+
+    // Determine particle type from index
+    int typeIndex = 0;
+    for (int t = 0; t < TypeCount; t++)
+    {
+        int startIdx = TypeStartIndices[t];
+        int count = TypeCounts[t];
+        
+        if (index >= startIdx && index < startIdx + count)
+        {
+            typeIndex = t;
+            break;
+        }
+    }
+
+    // Get type data
+    TypeData typeData = ParticleTypes[typeIndex];
+    
+    // Create a random seed from index
+    uint seed = index + 1;
+    
+    // Generate random position within bounds
+    float3 randomPos;
+    randomPos.x = (rand(seed) * 2 - 1) * (HalfBounds.x - typeData.radius);
+    randomPos.y = (rand(seed) * 2 - 1) * (HalfBounds.y - typeData.radius);
+    randomPos.z = (rand(seed) * 2 - 1) * (HalfBounds.z - typeData.radius);
+    
+    // Generate small random velocity
+    float3 randomVel;
+    randomVel.x = (rand(seed) * 2 - 1) * 0.5;
+    randomVel.y = (rand(seed) * 2 - 1) * 0.5;
+    randomVel.z = (rand(seed) * 2 - 1) * 0.5;
+
+    // Set particle data
+    ParticleData particle;
+    particle.position = randomPos;
+    particle.velocity = randomVel;
+    particle.typeIndex = typeIndex;
+    particle.mass = typeData.mass;
+    particle.radius = typeData.radius;
+    particle.padding = 0;
+    
+    // Write back to buffer
+    Particles[index] = particle;
+}
+
+// Reset the grid counter
+[numthreads(64, 1, 1)]
+void ResetGrid(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= TotalGridCells)
+        return;
+        
+    GridCounts[index] = 0;
+    GridOffsets[index] = 0;
+}
+
+// Assign each particle to a grid cell
+[numthreads(64, 1, 1)]
+void AssignParticlesToGrid(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= ActiveParticleCount)
+        return;
+    
+    ParticleData particle = Particles[index];
+    
+    // Skip inactive particles
+    if (particle.typeIndex < 0)
+        return;
+        
+    // Get cell index
+    int cellIndex = GetCellIndex(particle.position);
+    
+    // Set grid entry
+    GridEntry entry;
+    entry.cellIndex = cellIndex;
+    entry.particleIndex = index;
+    
+    ParticleGrid[index] = entry;
+    
+    // Increment the cell counter (atomic to handle thread race conditions)
+    InterlockedAdd(GridCounts[cellIndex], 1);
+}
+
+// Count particles per cell
+[numthreads(64, 1, 1)]
+void CountParticlesPerCell(uint3 id : SV_DispatchThreadID)
+{
+    // This is actually a no-op because we already counted atomically in AssignParticlesToGrid
+    // We keep this kernel for potential future extensions to the algorithm
+}
+
+// Calculate offset into sorted grid (parallel prefix sum)
+[numthreads(1, 1, 1)]
+void SortParticlesByCell(uint3 id : SV_DispatchThreadID)
+{
+    // Serial algorithm for simplicity, could be optimized with parallel scan
+    int offset = 0;
+    for (int i = 0; i < TotalGridCells; i++)
+    {
+        GridOffsets[i] = offset;
+        offset += GridCounts[i];
+    }
+}
+
+// Calculate forces
+[numthreads(64, 1, 1)]
+void CalculateForces(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= ActiveParticleCount)
+        return;
+        
+    ParticleData particle = Particles[index];
+    
+    // Skip inactive particles
+    if (particle.typeIndex < 0)
+        return;
+    
+    float3 position = particle.position;
+    float3 velocity = particle.velocity;
+    int typeIndex = particle.typeIndex;
+    float radius = particle.radius;
+    
+    // Get current cell and neighbors
+    int3 cell = WorldToCell(position);
+    
+    // Search radius depends on interaction radius and cell size
+    int searchRadius = max(1, min(16, int(ceil(InteractionRadius / CellSize))));
+    
+    // Apply LOD based on distance from camera (if enabled)
+    if (EnableLOD)
+    {
+        float distToCamera = length(position - CameraPosition);
+        float baseDist = InteractionRadius * 4;
+        
+        // Adaptive search radius based on distance and LOD factor
+        if (distToCamera > baseDist)
+        {
+            float distFactor = distToCamera / baseDist;
+            searchRadius = max(1, int(searchRadius / (distFactor * LODFactor)));
+        }
+    }
+    
+    // Safety cap on search radius to prevent excessive iteration
+    searchRadius = min(searchRadius, 8);
+    
+    // Calculate total force from interactions
+    float3 totalForce = float3(0, 0, 0);
+    
+    // Iterate through neighboring cells
+    for (int offsetX = -searchRadius; offsetX <= searchRadius; offsetX++)
+    {
+        for (int offsetY = -searchRadius; offsetY <= searchRadius; offsetY++)
+        {
+            for (int offsetZ = -searchRadius; offsetZ <= searchRadius; offsetZ++)
+            {
+                int3 neighborCell = cell + int3(offsetX, offsetY, offsetZ);
+                
+                // Skip if outside grid
+                if (neighborCell.x < 0 || neighborCell.x >= GridSizeX ||
+                    neighborCell.y < 0 || neighborCell.y >= GridSizeY ||
+                    neighborCell.z < 0 || neighborCell.z >= GridSizeZ)
+                    continue;
+                    
+                int neighborCellIndex = CellToIndex(neighborCell);
+                int neighborStart = GridOffsets[neighborCellIndex];
+                int neighborCount = GridCounts[neighborCellIndex];
+                
+                // Skip empty cells
+                if (neighborCount == 0)
+                    continue;
+                    
+                // Iterate through particles in this cell
+                for (int j = 0; j < neighborCount; j++)
+                {
+                    // Get particle index from sorted grid
+                    int offset = neighborStart + j;
+                    if (offset >= ActiveParticleCount)
+                        continue;
+                    
+                    int particleB_idx = ParticleGrid[offset].particleIndex;
+                    
+                    // Skip self-interaction
+                    if (particleB_idx == index)
+                        continue;
+                        
+                    ParticleData particleB = Particles[particleB_idx];
+                    
+                    // Skip inactive particles
+                    if (particleB.typeIndex < 0)
+                        continue;
+                        
+                    // Calculate direction and distance
+                    float3 direction = particleB.position - position;
+                    float distance = length(direction);
+                    
+                    // Skip if too far away
+                    if (distance > InteractionRadius)
+                        continue;
+                        
+                    // Prevent division by zero or extreme forces
+                    if (distance < MinDistance)
+                        distance = MinDistance;
+                    
+                    // Get attraction value from matrix (asymmetric - order matters)
+                    int matrixIndex = typeIndex + particleB.typeIndex * TypeCount;
+                    float attraction = InteractionMatrix[matrixIndex];
+                    
+                    // Calculate force magnitude (inverse square law with safety cap)
+                    float forceMagnitude = (attraction * InteractionStrength) / (distance * distance);
+                    
+                    // Cap the force magnitude to prevent extreme values
+                    forceMagnitude = clamp(forceMagnitude, -MaxForce, MaxForce);
+                    
+                    // Apply force in the right direction
+                    float3 normalizedDir = normalize(direction);
+                    totalForce += normalizedDir * forceMagnitude;
+                    
+                    // Collision response (for overlapping particles)
+                    float collisionDist = radius + particleB.radius;
+                    if (distance < collisionDist)
+                    {
+                        // Calculate repulsion force to resolve collision
+                        float penetration = collisionDist - distance;
+                        float repulsionForceMag = penetration * MaxForce * 0.5; // Scale for stability
+                        
+                        // Apply repulsion
+                        totalForce -= normalizedDir * repulsionForceMag;
+                        
+                        // Modify velocity for collision response
+                        float3 relVel = particleB.velocity - velocity;
+                        float velAlongNormal = dot(relVel, normalizedDir);
+                        
+                        // Only apply impulse if objects are moving toward each other
+                        if (velAlongNormal < 0)
+                        {
+                            // Calculate impulse scalar
+                            float invMassA = 1.0 / particle.mass;
+                            float invMassB = 1.0 / particleB.mass;
+                            float j = -(1.0 + CollisionElasticity) * velAlongNormal / (invMassA + invMassB);
+                            
+                            // Apply impulse to velocity
+                            velocity -= normalizedDir * (j * invMassA);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Apply force as acceleration (F = ma, so a = F/m)
+    float3 acceleration = totalForce / particle.mass;
+    
+    // Update velocity
+    velocity += acceleration * DeltaTime;
+    
+    // Apply dampening
+    velocity *= Dampening;
+    
+    // Cap velocity to prevent numerical instability
+    float speedSq = dot(velocity, velocity);
+    if (speedSq > MaxVelocity * MaxVelocity)
+    {
+        velocity = normalize(velocity) * MaxVelocity;
+    }
+    
+    // Write back to buffer
+    particle.velocity = velocity;
+    Particles[index] = particle;
+}
+
+// Integrate particles
+[numthreads(64, 1, 1)]
+void IntegrateParticles(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= ActiveParticleCount)
+        return;
+        
+    ParticleData particle = Particles[index];
+    
+    // Skip inactive particles
+    if (particle.typeIndex < 0)
+        return;
+    
+    // Update position
+    float3 position = particle.position + particle.velocity * DeltaTime;
+    float radius = particle.radius;
+    
+    // Check boundaries and bounce if needed
+    // X boundaries
+    if (position.x < -HalfBounds.x + radius)
+    {
+        position.x = -HalfBounds.x + radius;
+        particle.velocity.x = -particle.velocity.x * BounceForce;
+    }
+    else if (position.x > HalfBounds.x - radius)
+    {
+        position.x = HalfBounds.x - radius;
+        particle.velocity.x = -particle.velocity.x * BounceForce;
+    }
+    
+    // Y boundaries
+    if (position.y < -HalfBounds.y + radius)
+    {
+        position.y = -HalfBounds.y + radius;
+        particle.velocity.y = -particle.velocity.y * BounceForce;
+    }
+    else if (position.y > HalfBounds.y - radius)
+    {
+        position.y = HalfBounds.y - radius;
+        particle.velocity.y = -particle.velocity.y * BounceForce;
+    }
+    
+    // Z boundaries
+    if (position.z < -HalfBounds.z + radius)
+    {
+        position.z = -HalfBounds.z + radius;
+        particle.velocity.z = -particle.velocity.z * BounceForce;
+    }
+    else if (position.z > HalfBounds.z - radius)
+    {
+        position.z = HalfBounds.z - radius;
+        particle.velocity.z = -particle.velocity.z * BounceForce;
+    }
+    
+    // Update position
+    particle.position = position;
+    
+    // Write back to buffer
+    Particles[index] = particle;
+}
