@@ -130,6 +130,7 @@ GameObject:
   - component: {fileID: 304649981}
   - component: {fileID: 304649983}
   - component: {fileID: 304649982}
+  - component: {fileID: 304649984}
   m_Layer: 0
   m_Name: Simulation
   m_TagString: Untagged
@@ -168,6 +169,7 @@ MonoBehaviour:
   particleMesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}
   particleMaterial: {fileID: 0}
   particleShader: {fileID: 4800000, guid: 5abd9d47685b53a44a15560c03867b29, type: 3}
+  startParticlesAtCenter: 1
   simulationSpeed: 1
   collisionElasticity: 0.5
   simulationBounds: {x: 100, y: 100, z: 100}
@@ -255,6 +257,18 @@ MonoBehaviour:
   symmetryFactor: 0.1
   sparsity: 0.2
   noiseFactor: 0.1
+--- !u!114 &304649984
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 304649980}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 82334fc7477ef6f4296747f8f5e7d884, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
 --- !u!1 &330585543
 GameObject:
   m_ObjectHideFlags: 0

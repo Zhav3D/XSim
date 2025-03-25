@@ -57,6 +57,7 @@ public class GPUParticleSimulation : MonoBehaviour
     public Shader particleShader;
 
     [Header("Simulation Settings")]
+    public bool startParticlesAtCenter = false;
     [Range(0f, 5f)] public float simulationSpeed = 1.0f;
     [Range(0f, 1f)] public float collisionElasticity = 0.5f;
     public Vector3 simulationBounds = new Vector3(10f, 10f, 10f);
@@ -435,6 +436,17 @@ public class GPUParticleSimulation : MonoBehaviour
         simulationShader.SetBuffer(initKernel, "TypeCounts", typeCountsBuffer);
         simulationShader.SetBuffer(initKernel, "TypeStartIndices", typeStartIndicesBuffer);
 
+        for (int i = 0; i < maxParticleCount; i++)
+        {
+            particleData[i].position = Vector3.zero;
+            particleData[i].velocity = Vector3.zero;
+            particleData[i].typeIndex = -1;
+        }
+        particleBuffer.SetData(particleData);
+
+        simulationShader.SetBool("StartAtCenter", startParticlesAtCenter);
+        simulationShader.SetInt("GlobalRandomSeed", UnityEngine.Random.Range(0, int.MaxValue));
+
         // Dispatch initialization
         int threadGroups = Mathf.CeilToInt(maxParticleCount / 64.0f);
         simulationShader.Dispatch(initKernel, threadGroups, 1, 1);
@@ -740,15 +752,21 @@ public class GPUParticleSimulation : MonoBehaviour
 
     private void CleanupResources()
     {
-        // Release all compute buffers
-        if (particleBuffer != null) particleBuffer.Release();
-        if (typesBuffer != null) typesBuffer.Release();
-        if (interactionBuffer != null) interactionBuffer.Release();
-        if (gridBuffer != null) gridBuffer.Release();
-        if (gridCountBuffer != null) gridCountBuffer.Release();
-        if (gridOffsetBuffer != null) gridOffsetBuffer.Release();
-        if (argsBuffer != null) argsBuffer.Release();
-        if (colorBuffer != null) colorBuffer.Release();
+        // Release all compute buffers with explicit disposal
+        if (particleBuffer != null) { particleBuffer.Release(); particleBuffer = null; }
+        if (typesBuffer != null) { typesBuffer.Release(); typesBuffer = null; }
+        if (interactionBuffer != null) { interactionBuffer.Release(); interactionBuffer = null; }
+        if (gridBuffer != null) { gridBuffer.Release(); gridBuffer = null; }
+        if (gridCountBuffer != null) { gridCountBuffer.Release(); gridCountBuffer = null; }
+        if (gridOffsetBuffer != null) { gridOffsetBuffer.Release(); gridOffsetBuffer = null; }
+        if (argsBuffer != null) { argsBuffer.Release(); argsBuffer = null; }
+        if (colorBuffer != null) { colorBuffer.Release(); colorBuffer = null; }
+
+        // Force GC collection to clean up any remaining references
+        System.GC.Collect();
+
+        // Force a sync with the GPU to ensure all commands are processed
+        GL.Flush();
 
         // Destroy material
         if (instancedMaterial != null)
@@ -761,6 +779,7 @@ public class GPUParticleSimulation : MonoBehaviour
             {
                 DestroyImmediate(instancedMaterial);
             }
+            instancedMaterial = null;
         }
 
         initialized = false;

@@ -47,6 +47,8 @@ StructuredBuffer<int> TypeCounts;
 StructuredBuffer<int> TypeStartIndices;
 
 // Simulation parameters
+int GlobalRandomSeed;
+bool StartAtCenter;
 int ParticleCount;
 int MaxParticleCount;
 int ActiveParticleCount;
@@ -142,14 +144,26 @@ void InitParticles(uint3 id : SV_DispatchThreadID)
     // Get type data
     TypeData typeData = ParticleTypes[typeIndex];
     
-    // Create a random seed from index
-    uint seed = index + 1;
-    
-    // Generate random position within bounds
+    // Then in the InitParticles kernel, replace the position generation with:
+    // Create a random seed combining global seed and index
+    uint seed = (index + 1) ^ GlobalRandomSeed;
+
+    // Generate position based on initialization mode
     float3 randomPos;
-    randomPos.x = (rand(seed) * 2 - 1) * (HalfBounds.x - typeData.radius);
-    randomPos.y = (rand(seed) * 2 - 1) * (HalfBounds.y - typeData.radius);
-    randomPos.z = (rand(seed) * 2 - 1) * (HalfBounds.z - typeData.radius);
+    if (StartAtCenter)
+    {
+        // Start at center with tiny offset to prevent overlap
+        randomPos.x = (rand(seed) * 0.1f - 0.05f);
+        randomPos.y = (rand(seed) * 0.1f - 0.05f);
+        randomPos.z = (rand(seed) * 0.1f - 0.05f);
+    }
+    else
+    {
+        // Generate random position within bounds
+        randomPos.x = (rand(seed) * 2 - 1) * (HalfBounds.x - typeData.radius);
+        randomPos.y = (rand(seed) * 2 - 1) * (HalfBounds.y - typeData.radius);
+        randomPos.z = (rand(seed) * 2 - 1) * (HalfBounds.z - typeData.radius);
+    }
     
     // Generate small random velocity
     float3 randomVel;

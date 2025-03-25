@@ -139,6 +139,7 @@ public class GPUParticleSimulationEditor : Editor
             simulation.RequestReset();
         }
 
+        simulation.startParticlesAtCenter = EditorGUILayout.Toggle("Start Particles At Center", simulation.startParticlesAtCenter);
         simulation.dampening = EditorGUILayout.Slider("Dampening", simulation.dampening, 0.5f, 1f);
         simulation.interactionStrength = EditorGUILayout.Slider("Interaction Strength", simulation.interactionStrength, 0f, 5f);
         simulation.minDistance = EditorGUILayout.Slider("Min Distance", simulation.minDistance, 0.01f, 5f);
