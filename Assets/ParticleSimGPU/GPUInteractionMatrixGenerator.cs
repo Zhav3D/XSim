@@ -1,3 +1,4 @@
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEditor;
@@ -48,7 +49,7 @@ public class GPUInteractionMatrixGenerator : MonoBehaviour
         }
     }
 
-    // Call this method to regenerate the matrix
+    // Replace the GenerateMatrix method in GPUInteractionMatrixGenerator.cs
     public void GenerateMatrix()
     {
         if (simulation == null)
@@ -103,11 +104,21 @@ public class GPUInteractionMatrixGenerator : MonoBehaviour
         // Reset the simulation to apply changes
         if (Application.isPlaying)
         {
-            // First debug our rules
+            // Debug the rules that were created
             Debug.Log($"Matrix Generator created {simulation.interactionRules.Count} rules");
 
-            // This is the key step - we need to explicitly sync
+            // Show some examples of the rules
+            int debugCount = Mathf.Min(10, simulation.interactionRules.Count);
+            for (int i = 0; i < debugCount; i++)
+            {
+                var rule = simulation.interactionRules[i];
+                Debug.Log($"Rule {i}: Type {rule.typeIndexA} → Type {rule.typeIndexB} = {rule.attractionValue}");
+            }
+
+            // Explicitly sync the matrix to the GPU
             simulation.SyncMatrixFromGenerator(this);
+
+            // Request a reset of the simulation
             simulation.RequestReset();
         }
     }

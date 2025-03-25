@@ -1,7 +1,6 @@
 using UnityEngine;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using UnityEditor;
 using System;
 
 /// <summary>
@@ -204,7 +203,7 @@ public class GPUParticleSimulation : MonoBehaviour
         Gizmos.DrawWireCube(transform.position, simulationBounds);
 
         // Draw grid cells for debugging
-        if (EditorApplication.isPlaying && initialized)
+        if (Application.isPlaying && initialized)
         {
             Gizmos.color = new Color(0, 1, 0, 0.2f);
             Vector3 cellWorldSize = new Vector3(cellSize, cellSize, cellSize);
@@ -570,43 +569,39 @@ public class GPUParticleSimulation : MonoBehaviour
 
         Debug.Log("Syncing matrix from generator to simulation");
 
-        // Clear existing interaction rules
-        interactionRules.Clear();
+        // We don't need to clear interaction rules since the generator already has
+        // The most up-to-date rules after calling GenerateMatrix()
 
-        // Get visualized matrix from generator
-        float[,] matrix = generator.VisualizeMatrix();
-
-        // Create new interaction array
+        // Create array for GPU buffer update
         float[] interactions = new float[typeCount * typeCount];
 
-        // Copy rules from generator's matrix to our interaction rules
-        for (int i = 0; i < typeCount; i++)
+        // Initialize to zero
+        for (int i = 0; i < interactions.Length; i++)
         {
-            for (int j = 0; j < typeCount; j++)
+            interactions[i] = 0f;
+        }
+
+        // Copy values from interactionRules to GPU buffer
+        foreach (var rule in interactionRules)
+        {
+            int index = rule.typeIndexA + rule.typeIndexB * typeCount;
+            if (index >= 0 && index < interactions.Length)
             {
-                float value = matrix[i, j];
+                interactions[index] = rule.attractionValue;
 
-                // Only add non-zero rules
-                if (Math.Abs(value) > 0.001f)
-                {
-                    interactionRules.Add(new InteractionRule
-                    {
-                        typeIndexA = i,
-                        typeIndexB = j,
-                        attractionValue = value
-                    });
-
-                    // Set in the array too
-                    int index = i + j * typeCount;
-                    interactions[index] = value;
-                }
+                // Debug the value being sent to GPU
+                Debug.Log($"Matrix[{rule.typeIndexA},{rule.typeIndexB}] = {rule.attractionValue}");
+            }
+            else
+            {
+                Debug.LogError($"Invalid rule index: {index} (TypeA={rule.typeIndexA}, TypeB={rule.typeIndexB})");
             }
         }
 
         // Update the GPU buffer
         interactionBuffer.SetData(interactions);
 
-        Debug.Log($"Synced {interactionRules.Count} rules from generator");
+        Debug.Log($"Synced {interactionRules.Count} rules to GPU buffer");
     }
 
     private void DebugRenderParticles()

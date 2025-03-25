@@ -14,7 +14,7 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
 {
     // Editor window properties
     private bool showEditor = true;
-    private Rect editorWindowRect = new Rect(20, 20, 550, 650);
+    private Rect editorWindowRect = new Rect(20, 20, 600, 700);
     private Vector2 scrollPosition = Vector2.zero;
 
     // Tracked components
@@ -944,7 +944,7 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
             // Spawn Multiplier
             GUILayout.BeginHorizontal();
             GUILayout.Label("Spawn Multiplier:", GUILayout.Width(150));
-            matrixGenerator.particleSpawnMultiplier = GUILayout.HorizontalSlider(matrixGenerator.particleSpawnMultiplier, 0.1f, 10f, GUILayout.Width(200));
+            matrixGenerator.particleSpawnMultiplier = GUILayout.HorizontalSlider(matrixGenerator.particleSpawnMultiplier, 0.1f, 100f, GUILayout.Width(200));
             GUILayout.Label(matrixGenerator.particleSpawnMultiplier.ToString("F2"), GUILayout.Width(50));
             GUILayout.EndHorizontal();
 
