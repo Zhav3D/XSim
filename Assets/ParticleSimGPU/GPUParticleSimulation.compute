@@ -5,6 +5,7 @@
 #pragma kernel CalculateForces
 #pragma kernel IntegrateParticles
 #pragma kernel ResetGrid
+#pragma kernel ValidateParticles
 
 // Particle data structure (must match C# struct layout)
 struct ParticleData
@@ -349,11 +350,13 @@ void CalculateForces(uint3 id : SV_DispatchThreadID)
                     int matrixIndex = typeIndex + particleB.typeIndex * TypeCount;
                     float attraction = InteractionMatrix[matrixIndex];
                     
-                    // Calculate force magnitude (inverse square law with safety cap)
                     float forceMagnitude = (attraction * InteractionStrength) / (distance * distance);
-                    
-                    // Cap the force magnitude to prevent extreme values
-                    forceMagnitude = clamp(forceMagnitude, -MaxForce, MaxForce);
+                    // Apply sigmoid-like capping to prevent sharp cutoffs
+                    if (abs(forceMagnitude) > MaxForce)
+                    {
+                        float sign = forceMagnitude > 0 ? 1.0 : -1.0;
+                        forceMagnitude = sign * (MaxForce - MaxForce / (1.0 + abs(forceMagnitude) / MaxForce));
+                    }
                     
                     // Apply force in the right direction
                     float3 normalizedDir = normalize(direction);
@@ -404,7 +407,9 @@ void CalculateForces(uint3 id : SV_DispatchThreadID)
     float speedSq = dot(velocity, velocity);
     if (speedSq > MaxVelocity * MaxVelocity)
     {
-        velocity = normalize(velocity) * MaxVelocity;
+        float currentSpeed = sqrt(speedSq);
+        float scale = (MaxVelocity + min(currentSpeed - MaxVelocity, MaxVelocity * 0.5f)) / currentSpeed;
+        velocity *= scale;
     }
     
     // Write back to buffer
@@ -467,9 +472,44 @@ void IntegrateParticles(uint3 id : SV_DispatchThreadID)
         particle.velocity.z = -particle.velocity.z * BounceForce;
     }
     
+    if (particle.typeIndex < 0)
+    {
+    // This should never happen during normal simulation, log if it does
+        particle.typeIndex = max(0, particle.typeIndex);
+    }
+    
     // Update position
     particle.position = position;
     
     // Write back to buffer
+    Particles[index] = particle;
+}
+
+[numthreads(64, 1, 1)]
+void ValidateParticles(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= MaxParticleCount)
+        return;
+        
+    ParticleData particle = Particles[index];
+    
+    // Check for invalid positions (NaN)
+    if (any(isnan(particle.position)) || any(isnan(particle.velocity)))
+    {
+        // Reset to valid values
+        particle.position = float3(0, 0, 0);
+        particle.velocity = float3(0, 0, 0);
+    }
+    
+    // Ensure particle stays within bounds even if it somehow escaped
+    particle.position = clamp(particle.position, -HalfBounds + particle.radius, HalfBounds - particle.radius);
+    
+    // Ensure valid type index
+    if (index < ParticleCount && particle.typeIndex < 0)
+    {
+        particle.typeIndex = 0; // Reset to default type
+    }
+    
     Particles[index] = particle;
 }

@@ -530,6 +530,131 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
         GUILayout.Label(simulation.interactionRadius.ToString("F1"), GUILayout.Width(50));
         GUILayout.EndHorizontal();
 
+        GUILayout.Space(10);
+        GUILayout.Label("Simulation Bounds", subHeaderStyle);
+
+        // X Bound
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Bounds X:", GUILayout.Width(150));
+        float newBoundsX = float.Parse(GUILayout.TextField(simulation.simulationBounds.x.ToString("F1"), GUILayout.Width(60)));
+        float boundsDiffX = GUILayout.HorizontalSlider(simulation.simulationBounds.x, 1f, 100f, GUILayout.Width(140));
+        if (Mathf.Abs(boundsDiffX - simulation.simulationBounds.x) > 0.01f)
+        {
+            Vector3 newBounds = simulation.simulationBounds;
+            newBounds.x = boundsDiffX;
+            simulation.simulationBounds = newBounds;
+            if (Application.isPlaying)
+            {
+                simulation.RequestReset();
+            }
+        }
+        else if (Mathf.Abs(newBoundsX - simulation.simulationBounds.x) > 0.01f)
+        {
+            Vector3 newBounds = simulation.simulationBounds;
+            newBounds.x = Mathf.Max(1f, newBoundsX);
+            simulation.simulationBounds = newBounds;
+            if (Application.isPlaying)
+            {
+                simulation.RequestReset();
+            }
+        }
+        GUILayout.EndHorizontal();
+
+        // Y Bound
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Bounds Y:", GUILayout.Width(150));
+        float newBoundsY = float.Parse(GUILayout.TextField(simulation.simulationBounds.y.ToString("F1"), GUILayout.Width(60)));
+        float boundsDiffY = GUILayout.HorizontalSlider(simulation.simulationBounds.y, 1f, 100f, GUILayout.Width(140));
+        if (Mathf.Abs(boundsDiffY - simulation.simulationBounds.y) > 0.01f)
+        {
+            Vector3 newBounds = simulation.simulationBounds;
+            newBounds.y = boundsDiffY;
+            simulation.simulationBounds = newBounds;
+            if (Application.isPlaying)
+            {
+                simulation.RequestReset();
+            }
+        }
+        else if (Mathf.Abs(newBoundsY - simulation.simulationBounds.y) > 0.01f)
+        {
+            Vector3 newBounds = simulation.simulationBounds;
+            newBounds.y = Mathf.Max(1f, newBoundsY);
+            simulation.simulationBounds = newBounds;
+            if (Application.isPlaying)
+            {
+                simulation.RequestReset();
+            }
+        }
+        GUILayout.EndHorizontal();
+
+        // Z Bound
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Bounds Z:", GUILayout.Width(150));
+        float newBoundsZ = float.Parse(GUILayout.TextField(simulation.simulationBounds.z.ToString("F1"), GUILayout.Width(60)));
+        float boundsDiffZ = GUILayout.HorizontalSlider(simulation.simulationBounds.z, 1f, 100f, GUILayout.Width(140));
+        if (Mathf.Abs(boundsDiffZ - simulation.simulationBounds.z) > 0.01f)
+        {
+            Vector3 newBounds = simulation.simulationBounds;
+            newBounds.z = boundsDiffZ;
+            simulation.simulationBounds = newBounds;
+            if (Application.isPlaying)
+            {
+                simulation.RequestReset();
+            }
+        }
+        else if (Mathf.Abs(newBoundsZ - simulation.simulationBounds.z) > 0.01f)
+        {
+            Vector3 newBounds = simulation.simulationBounds;
+            newBounds.z = Mathf.Max(1f, newBoundsZ);
+            simulation.simulationBounds = newBounds;
+            if (Application.isPlaying)
+            {
+                simulation.RequestReset();
+            }
+        }
+        GUILayout.EndHorizontal();
+
+        // Reset bounds button
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Reset Bounds to Default (10,10,10)", GUILayout.Width(250)))
+        {
+            simulation.simulationBounds = new Vector3(10f, 10f, 10f);
+            if (Application.isPlaying)
+            {
+                simulation.RequestReset();
+            }
+        }
+        GUILayout.EndHorizontal();
+
+        // Add a section for quick simulation speed control
+        GUILayout.Space(15);
+        GUILayout.Label("Quick Controls", subHeaderStyle);
+
+        // Quick speed controls
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Speed Control:", GUILayout.Width(120));
+        if (GUILayout.Button("0.25x", GUILayout.Width(60)))
+        {
+            simulation.simulationSpeed = 0.25f;
+        }
+        if (GUILayout.Button("0.5x", GUILayout.Width(60)))
+        {
+            simulation.simulationSpeed = 0.5f;
+        }
+        if (GUILayout.Button("1x", GUILayout.Width(60)))
+        {
+            simulation.simulationSpeed = 1f;
+        }
+        if (GUILayout.Button("2x", GUILayout.Width(60)))
+        {
+            simulation.simulationSpeed = 2f;
+        }
+        if (GUILayout.Button("4x", GUILayout.Width(60)))
+        {
+            simulation.simulationSpeed = 4f;
+        }
+        GUILayout.EndHorizontal();
+
         GUILayout.EndVertical();
     }
 
@@ -944,7 +1069,7 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
             // Spawn Multiplier
             GUILayout.BeginHorizontal();
             GUILayout.Label("Spawn Multiplier:", GUILayout.Width(150));
-            matrixGenerator.particleSpawnMultiplier = GUILayout.HorizontalSlider(matrixGenerator.particleSpawnMultiplier, 0.1f, 100f, GUILayout.Width(200));
+            matrixGenerator.particleSpawnMultiplier = GUILayout.HorizontalSlider(matrixGenerator.particleSpawnMultiplier, 0.1f, 500f, GUILayout.Width(200));
             GUILayout.Label(matrixGenerator.particleSpawnMultiplier.ToString("F2"), GUILayout.Width(50));
             GUILayout.EndHorizontal();
 

@@ -109,6 +109,7 @@ public class GPUParticleSimulation : MonoBehaviour
     private int forceKernel;
     private int integrateKernel;
     private int resetGridKernel;
+    private int validateKernel;
 
     // Compute buffers
     private ComputeBuffer particleBuffer;
@@ -305,6 +306,10 @@ public class GPUParticleSimulation : MonoBehaviour
 
     private void InitializeGrid()
     {
+        cellSize = Mathf.Min(
+            cellSize,
+            Mathf.Min(simulationBounds.x, Mathf.Min(simulationBounds.y, simulationBounds.z)) / 4f
+        );
         gridSizeX = Mathf.Max(1, Mathf.CeilToInt(simulationBounds.x / cellSize));
         gridSizeY = Mathf.Max(1, Mathf.CeilToInt(simulationBounds.y / cellSize));
         gridSizeZ = Mathf.Max(1, Mathf.CeilToInt(simulationBounds.z / cellSize));
@@ -324,6 +329,7 @@ public class GPUParticleSimulation : MonoBehaviour
         forceKernel = simulationShader.FindKernel("CalculateForces");
         integrateKernel = simulationShader.FindKernel("IntegrateParticles");
         resetGridKernel = simulationShader.FindKernel("ResetGrid");
+        validateKernel = simulationShader.FindKernel("ValidateParticles");
     }
 
     private void CreateBuffers()
@@ -596,6 +602,8 @@ public class GPUParticleSimulation : MonoBehaviour
             {
                 Debug.LogError($"Invalid rule index: {index} (TypeA={rule.typeIndexA}, TypeB={rule.typeIndexB})");
             }
+
+            rule.attractionValue = Mathf.Clamp(rule.attractionValue, -2f, 2f);
         }
 
         // Update the GPU buffer
@@ -717,6 +725,12 @@ public class GPUParticleSimulation : MonoBehaviour
         // Integrate particles
         simulationShader.SetBuffer(integrateKernel, "Particles", particleBuffer);
         simulationShader.Dispatch(integrateKernel, threadGroups, 1, 1);
+
+        // Add this section to validate particles
+        simulationShader.SetBuffer(validateKernel, "Particles", particleBuffer);
+        simulationShader.SetInt("MaxParticleCount", maxParticleCount);
+        simulationShader.SetInt("ParticleCount", particleCount);
+        simulationShader.Dispatch(validateKernel, Mathf.CeilToInt(maxParticleCount / 64.0f), 1, 1);
 
         // Update args buffer for rendering
         args[1] = (uint)activeParticleCount;
