@@ -626,6 +626,223 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
         }
         GUILayout.EndHorizontal();
 
+        // Bounds Shape Selection
+        GUILayout.Space(10);
+        GUILayout.Label("Bounds Shape", subHeaderStyle);
+
+        string[] boundsShapeNames = System.Enum.GetNames(typeof(GPUParticleSimulation.BoundsShape));
+        int currentBoundsShapeIndex = (int)simulation.boundsShape;
+
+        int newBoundsShapeIndex = GUILayout.SelectionGrid(currentBoundsShapeIndex, boundsShapeNames, boundsShapeNames.Length);
+
+        if (newBoundsShapeIndex != currentBoundsShapeIndex)
+        {
+            simulation.boundsShape = (GPUParticleSimulation.BoundsShape)newBoundsShapeIndex;
+            if (Application.isPlaying)
+            {
+                simulation.RequestReset();
+            }
+        }
+
+        // Display shape-specific parameters based on selection
+        switch (simulation.boundsShape)
+        {
+            case GPUParticleSimulation.BoundsShape.Box:
+                // Box bounds controls are already shown above
+                break;
+
+            case GPUParticleSimulation.BoundsShape.Sphere:
+                // Sphere radius control
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Sphere Radius:", GUILayout.Width(150));
+                float newSphereRadius = float.Parse(GUILayout.TextField(simulation.sphereRadius.ToString("F1"), GUILayout.Width(60)));
+                float sphereRadiusDiff = GUILayout.HorizontalSlider(simulation.sphereRadius, 1f, 250f, GUILayout.Width(140));
+
+                if (Mathf.Abs(sphereRadiusDiff - simulation.sphereRadius) > 0.01f)
+                {
+                    simulation.sphereRadius = sphereRadiusDiff;
+                    if (Application.isPlaying)
+                    {
+                        simulation.RequestReset();
+                    }
+                }
+                else if (Mathf.Abs(newSphereRadius - simulation.sphereRadius) > 0.01f)
+                {
+                    simulation.sphereRadius = Mathf.Max(1f, newSphereRadius);
+                    if (Application.isPlaying)
+                    {
+                        simulation.RequestReset();
+                    }
+                }
+                GUILayout.EndHorizontal();
+                break;
+
+            case GPUParticleSimulation.BoundsShape.Cylinder:
+                // Cylinder radius control
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Cylinder Radius:", GUILayout.Width(150));
+                float newCylinderRadius = float.Parse(GUILayout.TextField(simulation.cylinderRadius.ToString("F1"), GUILayout.Width(60)));
+                float cylinderRadiusDiff = GUILayout.HorizontalSlider(simulation.cylinderRadius, 1f, 50f, GUILayout.Width(140));
+
+                if (Mathf.Abs(cylinderRadiusDiff - simulation.cylinderRadius) > 0.01f)
+                {
+                    simulation.cylinderRadius = cylinderRadiusDiff;
+                    if (Application.isPlaying)
+                    {
+                        simulation.RequestReset();
+                    }
+                }
+                else if (Mathf.Abs(newCylinderRadius - simulation.cylinderRadius) > 0.01f)
+                {
+                    simulation.cylinderRadius = Mathf.Max(1f, newCylinderRadius);
+                    if (Application.isPlaying)
+                    {
+                        simulation.RequestReset();
+                    }
+                }
+                GUILayout.EndHorizontal();
+
+                // Cylinder height control
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Cylinder Height:", GUILayout.Width(150));
+                float newCylinderHeight = float.Parse(GUILayout.TextField(simulation.cylinderHeight.ToString("F1"), GUILayout.Width(60)));
+                float cylinderHeightDiff = GUILayout.HorizontalSlider(simulation.cylinderHeight, 1f, 100f, GUILayout.Width(140));
+
+                if (Mathf.Abs(cylinderHeightDiff - simulation.cylinderHeight) > 0.01f)
+                {
+                    simulation.cylinderHeight = cylinderHeightDiff;
+                    if (Application.isPlaying)
+                    {
+                        simulation.RequestReset();
+                    }
+                }
+                else if (Mathf.Abs(newCylinderHeight - simulation.cylinderHeight) > 0.01f)
+                {
+                    simulation.cylinderHeight = Mathf.Max(1f, newCylinderHeight);
+                    if (Application.isPlaying)
+                    {
+                        simulation.RequestReset();
+                    }
+                }
+                GUILayout.EndHorizontal();
+                break;
+        }
+
+        // Add presets for each bounds type
+        GUILayout.Space(5);
+        GUILayout.Label("Bounds Presets:", GUILayout.Width(100));
+        GUILayout.BeginHorizontal();
+
+        // Box presets
+        if (GUILayout.Button("Small Box", GUILayout.Width(80)))
+        {
+            simulation.boundsShape = GPUParticleSimulation.BoundsShape.Box;
+            simulation.simulationBounds = new Vector3(5f, 5f, 5f);
+            if (Application.isPlaying) simulation.RequestReset();
+        }
+
+        if (GUILayout.Button("Medium Box", GUILayout.Width(100)))
+        {
+            simulation.boundsShape = GPUParticleSimulation.BoundsShape.Box;
+            simulation.simulationBounds = new Vector3(10f, 10f, 10f);
+            if (Application.isPlaying) simulation.RequestReset();
+        }
+
+        if (GUILayout.Button("Large Box", GUILayout.Width(80)))
+        {
+            simulation.boundsShape = GPUParticleSimulation.BoundsShape.Box;
+            simulation.simulationBounds = new Vector3(20f, 20f, 20f);
+            if (Application.isPlaying) simulation.RequestReset();
+        }
+
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+
+        // Sphere presets
+        if (GUILayout.Button("Small Sphere", GUILayout.Width(100)))
+        {
+            simulation.boundsShape = GPUParticleSimulation.BoundsShape.Sphere;
+            simulation.sphereRadius = 5f;
+            if (Application.isPlaying) simulation.RequestReset();
+        }
+
+        if (GUILayout.Button("Medium Sphere", GUILayout.Width(120)))
+        {
+            simulation.boundsShape = GPUParticleSimulation.BoundsShape.Sphere;
+            simulation.sphereRadius = 10f;
+            if (Application.isPlaying) simulation.RequestReset();
+        }
+
+        if (GUILayout.Button("Large Sphere", GUILayout.Width(100)))
+        {
+            simulation.boundsShape = GPUParticleSimulation.BoundsShape.Sphere;
+            simulation.sphereRadius = 20f;
+            if (Application.isPlaying) simulation.RequestReset();
+        }
+
+        GUILayout.EndHorizontal();
+
+        GUILayout.BeginHorizontal();
+
+        // Cylinder presets
+        if (GUILayout.Button("Flat Disk", GUILayout.Width(80)))
+        {
+            simulation.boundsShape = GPUParticleSimulation.BoundsShape.Cylinder;
+            simulation.cylinderRadius = 15f;
+            simulation.cylinderHeight = 3f;
+            if (Application.isPlaying) simulation.RequestReset();
+        }
+
+        if (GUILayout.Button("Cylinder", GUILayout.Width(80)))
+        {
+            simulation.boundsShape = GPUParticleSimulation.BoundsShape.Cylinder;
+            simulation.cylinderRadius = 10f;
+            simulation.cylinderHeight = 20f;
+            if (Application.isPlaying) simulation.RequestReset();
+        }
+
+        if (GUILayout.Button("Tall Column", GUILayout.Width(100)))
+        {
+            simulation.boundsShape = GPUParticleSimulation.BoundsShape.Cylinder;
+            simulation.cylinderRadius = 5f;
+            simulation.cylinderHeight = 30f;
+            if (Application.isPlaying) simulation.RequestReset();
+        }
+
+        GUILayout.EndHorizontal();
+
+        // Add button to toggle bounds visualization
+        GUILayout.Space(5);
+        GUILayout.BeginHorizontal();
+        bool wasVisualizingBounds = simulation.GetComponent<BoundsVisualizer>() != null;
+        bool shouldVisualizeBounds = GUILayout.Toggle(wasVisualizingBounds, "Visualize Bounds in Play Mode");
+
+        if (wasVisualizingBounds != shouldVisualizeBounds)
+        {
+            if (shouldVisualizeBounds)
+            {
+                // Add visualizer component if not present
+                if (simulation.GetComponent<BoundsVisualizer>() == null)
+                {
+                    simulation.gameObject.AddComponent<BoundsVisualizer>();
+                }
+            }
+            else
+            {
+                // Remove visualizer if present
+                BoundsVisualizer visualizer = simulation.GetComponent<BoundsVisualizer>();
+                if (visualizer != null)
+                {
+                    if (Application.isPlaying)
+                        Destroy(visualizer);
+                    else
+                        DestroyImmediate(visualizer);
+                }
+            }
+        }
+        GUILayout.EndHorizontal();
+
         // Add a section for quick simulation speed control
         GUILayout.Space(15);
         GUILayout.Label("Quick Controls", subHeaderStyle);

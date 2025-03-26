@@ -80,6 +80,12 @@ float LODFactor;
 float4x4 CameraToWorldMatrix;
 float3 CameraPosition;
 
+// Bounds shape parameters
+int BoundsShapeType; // 0 = Box, 1 = Sphere, 2 = Cylinder
+float SphereRadius;
+float CylinderRadius;
+float CylinderHeight;
+
 // Random number functions
 uint wang_hash(uint seed)
 {
@@ -153,17 +159,49 @@ void InitParticles(uint3 id : SV_DispatchThreadID)
     float3 randomPos;
     if (StartAtCenter)
     {
-        // Start at center with tiny offset to prevent overlap
+    // Start at center with tiny offset to prevent overlap
         randomPos.x = (rand(seed) * 0.1f - 0.05f);
         randomPos.y = (rand(seed) * 0.1f - 0.05f);
         randomPos.z = (rand(seed) * 0.1f - 0.05f);
     }
     else
     {
-        // Generate random position within bounds
-        randomPos.x = (rand(seed) * 2 - 1) * (HalfBounds.x - typeData.radius);
-        randomPos.y = (rand(seed) * 2 - 1) * (HalfBounds.y - typeData.radius);
-        randomPos.z = (rand(seed) * 2 - 1) * (HalfBounds.z - typeData.radius);
+    // Generate random position within bounds based on shape
+        if (BoundsShapeType == 0) // Box
+        {
+        // Generate random position within box bounds
+            randomPos.x = (rand(seed) * 2 - 1) * (HalfBounds.x - typeData.radius);
+            randomPos.y = (rand(seed) * 2 - 1) * (HalfBounds.y - typeData.radius);
+            randomPos.z = (rand(seed) * 2 - 1) * (HalfBounds.z - typeData.radius);
+        }
+        else if (BoundsShapeType == 1) // Sphere
+        {
+        // Generate random position within sphere
+            float theta = rand(seed) * 2.0f * 3.14159265f; // Random angle around Y axis
+            float phi = acos(2.0f * rand(seed) - 1.0f); // Random angle from Y axis
+            float r = pow(rand(seed), 1.0f / 3.0f) * (SphereRadius - typeData.radius); // Cube root for uniform distribution
+        
+        // Convert spherical to cartesian coordinates
+            randomPos.x = r * sin(phi) * cos(theta);
+            randomPos.y = r * cos(phi);
+            randomPos.z = r * sin(phi) * sin(theta);
+        }
+        else if (BoundsShapeType == 2) // Cylinder
+        {
+        // Random angle around Y axis
+            float theta = rand(seed) * 2.0f * 3.14159265f;
+        
+        // Random radius (square root for uniform distribution)
+            float r = sqrt(rand(seed)) * (CylinderRadius - typeData.radius);
+        
+        // Random height
+            float height = (rand(seed) * 2 - 1) * (CylinderHeight * 0.5f - typeData.radius);
+        
+        // Convert to cartesian coordinates
+            randomPos.x = r * cos(theta);
+            randomPos.y = height;
+            randomPos.z = r * sin(theta);
+        }
     }
     
     // Generate small random velocity
@@ -436,45 +474,120 @@ void IntegrateParticles(uint3 id : SV_DispatchThreadID)
     float radius = particle.radius;
     
     // Check boundaries and bounce if needed
-    // X boundaries
-    if (position.x < -HalfBounds.x + radius)
+    if (BoundsShapeType == 0) // Box bounds
     {
-        position.x = -HalfBounds.x + radius;
-        particle.velocity.x = -particle.velocity.x * BounceForce;
-    }
-    else if (position.x > HalfBounds.x - radius)
-    {
-        position.x = HalfBounds.x - radius;
-        particle.velocity.x = -particle.velocity.x * BounceForce;
-    }
+        // X boundaries
+        if (position.x < -HalfBounds.x + radius)
+        {
+            position.x = -HalfBounds.x + radius;
+            particle.velocity.x = -particle.velocity.x * BounceForce;
+        }
+        else if (position.x > HalfBounds.x - radius)
+        {
+            position.x = HalfBounds.x - radius;
+            particle.velocity.x = -particle.velocity.x * BounceForce;
+        }
     
-    // Y boundaries
-    if (position.y < -HalfBounds.y + radius)
-    {
-        position.y = -HalfBounds.y + radius;
-        particle.velocity.y = -particle.velocity.y * BounceForce;
-    }
-    else if (position.y > HalfBounds.y - radius)
-    {
-        position.y = HalfBounds.y - radius;
-        particle.velocity.y = -particle.velocity.y * BounceForce;
-    }
+        // Y boundaries
+        if (position.y < -HalfBounds.y + radius)
+        {
+            position.y = -HalfBounds.y + radius;
+            particle.velocity.y = -particle.velocity.y * BounceForce;
+        }
+        else if (position.y > HalfBounds.y - radius)
+        {
+            position.y = HalfBounds.y - radius;
+            particle.velocity.y = -particle.velocity.y * BounceForce;
+        }
     
-    // Z boundaries
-    if (position.z < -HalfBounds.z + radius)
-    {
-        position.z = -HalfBounds.z + radius;
-        particle.velocity.z = -particle.velocity.z * BounceForce;
+        // Z boundaries
+        if (position.z < -HalfBounds.z + radius)
+        {
+            position.z = -HalfBounds.z + radius;
+            particle.velocity.z = -particle.velocity.z * BounceForce;
+        }
+        else if (position.z > HalfBounds.z - radius)
+        {
+            position.z = HalfBounds.z - radius;
+            particle.velocity.z = -particle.velocity.z * BounceForce;
+        }
     }
-    else if (position.z > HalfBounds.z - radius)
+    else if (BoundsShapeType == 1) // Sphere bounds
     {
-        position.z = HalfBounds.z - radius;
-        particle.velocity.z = -particle.velocity.z * BounceForce;
+        // Get distance from center
+        float distFromCenter = length(position);
+        float maxDist = SphereRadius - radius;
+    
+        // If outside bounds, bounce back in
+        if (distFromCenter > maxDist && distFromCenter > 0.0001f)
+        {
+            // Get normal direction (pointing outward from sphere center)
+            float3 normal = normalize(position);
+        
+            // Position the particle at the boundary
+            position = normal * maxDist;
+        
+            // Calculate velocity component along the normal
+            float3 velocity = particle.velocity;
+            float vdotn = dot(velocity, normal);
+        
+            // Only apply bounce if moving outward
+            if (vdotn > 0) // If moving outward
+            {
+                // Reflect velocity across the normal
+                particle.velocity = velocity - 2 * vdotn * normal * BounceForce;
+            }
+        }
+    }
+    else if (BoundsShapeType == 2) // Cylinder bounds
+    {
+        // Check horizontal distance (XZ plane)
+        float2 horizontalPos = float2(position.x, position.z);
+        float horizontalDist = length(horizontalPos);
+        float maxRadius = CylinderRadius - radius;
+    
+        // Handle radial bounds
+        if (horizontalDist > maxRadius && horizontalDist > 0.0001f)
+        {
+            // Get normalized direction in XZ plane
+            float2 normal2D = normalize(horizontalPos);
+        
+            // Reposition to boundary
+            position.x = normal2D.x * maxRadius;
+            position.z = normal2D.y * maxRadius;
+        
+            // Construct 3D normal (XZ components only)
+            float3 normal = float3(normal2D.x, 0, normal2D.y);
+        
+            // Reflect velocity
+            float3 velocity = particle.velocity;
+            float vdotn = dot(velocity, normal);
+        
+            // Only bounce if moving outward
+            if (vdotn > 0)
+            {
+                particle.velocity = velocity - 2 * vdotn * normal * BounceForce;
+            }
+        }
+    
+        // Handle height bounds (Y axis)
+        float halfHeight = CylinderHeight * 0.5f - radius;
+    
+        if (position.y < -halfHeight)
+        {
+            position.y = -halfHeight;
+            particle.velocity.y = -particle.velocity.y * BounceForce;
+        }
+        else if (position.y > halfHeight)
+        {
+            position.y = halfHeight;
+            particle.velocity.y = -particle.velocity.y * BounceForce;
+        }
     }
     
     if (particle.typeIndex < 0)
     {
-    // This should never happen during normal simulation, log if it does
+        // This should never happen during normal simulation, log if it does
         particle.typeIndex = max(0, particle.typeIndex);
     }
     
@@ -503,7 +616,38 @@ void ValidateParticles(uint3 id : SV_DispatchThreadID)
     }
     
     // Ensure particle stays within bounds even if it somehow escaped
-    particle.position = clamp(particle.position, -HalfBounds + particle.radius, HalfBounds - particle.radius);
+    if (BoundsShapeType == 0) // Box
+    {
+        particle.position = clamp(particle.position, -HalfBounds + particle.radius, HalfBounds - particle.radius);
+    }
+    else if (BoundsShapeType == 1) // Sphere
+    {
+        float distFromCenter = length(particle.position);
+        float maxDist = SphereRadius - particle.radius;
+    
+        if (distFromCenter > maxDist)
+        {
+            particle.position = normalize(particle.position) * maxDist;
+        }
+    }
+    else if (BoundsShapeType == 2) // Cylinder
+    {
+        // Clamp horizontal distance
+        float2 horizontalPos = float2(particle.position.x, particle.position.z);
+        float horizontalDist = length(horizontalPos);
+        float maxRadius = CylinderRadius - particle.radius;
+    
+        if (horizontalDist > maxRadius)
+        {
+            float2 normalizedPos = normalize(horizontalPos);
+            particle.position.x = normalizedPos.x * maxRadius;
+            particle.position.z = normalizedPos.y * maxRadius;
+        }
+    
+        // Clamp height
+        float halfHeight = CylinderHeight * 0.5f - particle.radius;
+        particle.position.y = clamp(particle.position.y, -halfHeight, halfHeight);
+    }
     
     // Ensure valid type index
     if (index < ParticleCount && particle.typeIndex < 0)

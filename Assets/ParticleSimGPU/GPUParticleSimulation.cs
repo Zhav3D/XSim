@@ -45,6 +45,13 @@ public class GPUParticleSimulation : MonoBehaviour
         public float attractionValue; // Positive for attraction, negative for repulsion
     }
 
+    public enum BoundsShape
+    {
+        Box,
+        Sphere,
+        Cylinder
+    }
+
     #endregion
 
     #region Simulation Parameters
@@ -80,6 +87,12 @@ public class GPUParticleSimulation : MonoBehaviour
     [Range(0.1f, 1.0f)] public float lodAdjustSpeed = 0.2f;
     public float currentLODFactor = 1.0f;
     private float[] lodDistanceMultipliers = new float[] { 1.0f, 2.0f, 4.0f, 8.0f };
+
+    [Header("Bounds Settings")]
+    public BoundsShape boundsShape = BoundsShape.Box;
+    public float sphereRadius = 10f;  // For spherical bounds
+    public float cylinderRadius = 10f; // For cylindrical bounds
+    public float cylinderHeight = 20f; // For cylindrical bounds
 
     // Statistics and debug
     [Header("Debug Info")]
@@ -232,6 +245,66 @@ public class GPUParticleSimulation : MonoBehaviour
             }
             if (debugDrawParticles)
                 DebugRenderParticles();
+        }
+    }
+
+    void OnDrawGizmosSelected()
+    {
+        // Draw simulation bounds based on shape
+        switch (boundsShape)
+        {
+            case BoundsShape.Box:
+                Gizmos.color = Color.yellow;
+                Gizmos.DrawWireCube(transform.position, simulationBounds);
+                break;
+
+            case BoundsShape.Sphere:
+                Gizmos.color = Color.yellow;
+                Gizmos.DrawWireSphere(transform.position, sphereRadius);
+                break;
+
+            case BoundsShape.Cylinder:
+                Gizmos.color = Color.yellow;
+                DrawWireCylinder(transform.position, cylinderRadius, cylinderHeight);
+                break;
+        }
+    }
+
+    void DrawWireCylinder(Vector3 position, float radius, float height)
+    {
+        // Draw top and bottom circles
+        float halfHeight = height * 0.5f;
+        DrawWireCircle(position + new Vector3(0, halfHeight, 0), radius);
+        DrawWireCircle(position - new Vector3(0, halfHeight, 0), radius);
+
+        // Draw connecting lines
+        int segments = 12;
+        float angleStep = 2 * Mathf.PI / segments;
+
+        for (int i = 0; i < segments; i++)
+        {
+            float angle = i * angleStep;
+            float x = Mathf.Cos(angle) * radius;
+            float z = Mathf.Sin(angle) * radius;
+
+            Vector3 bottomPoint = position + new Vector3(x, -halfHeight, z);
+            Vector3 topPoint = position + new Vector3(x, halfHeight, z);
+            Gizmos.DrawLine(bottomPoint, topPoint);
+        }
+    }
+
+    void DrawWireCircle(Vector3 position, float radius)
+    {
+        int segments = 32;
+        float angleStep = 2 * Mathf.PI / segments;
+        Vector3 prevPoint = position + new Vector3(radius, 0, 0);
+
+        for (int i = 1; i <= segments; i++)
+        {
+            float angle = i * angleStep;
+            Vector3 nextPoint = position + new Vector3(Mathf.Cos(angle) * radius, 0, Mathf.Sin(angle) * radius);
+            Gizmos.DrawLine(prevPoint, nextPoint);
+            prevPoint = nextPoint;
         }
     }
 
@@ -675,6 +748,12 @@ public class GPUParticleSimulation : MonoBehaviour
         simulationShader.SetBool("EnableLOD", enableLOD);
         simulationShader.SetInt("LODLevels", lodLevels);
         simulationShader.SetFloat("LODFactor", currentLODFactor);
+
+        // Bounds parameters
+        simulationShader.SetInt("BoundsShapeType", (int)boundsShape);
+        simulationShader.SetFloat("SphereRadius", sphereRadius);
+        simulationShader.SetFloat("CylinderRadius", cylinderRadius);
+        simulationShader.SetFloat("CylinderHeight", cylinderHeight);
 
         // Pass camera info for LOD
         if (Camera.main != null)

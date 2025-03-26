@@ -131,6 +131,8 @@ GameObject:
   - component: {fileID: 304649983}
   - component: {fileID: 304649982}
   - component: {fileID: 304649984}
+  - component: {fileID: 304649985}
+  - component: {fileID: 304649986}
   m_Layer: 0
   m_Name: Simulation
   m_TagString: Untagged
@@ -188,6 +190,10 @@ MonoBehaviour:
   targetFPS: 60
   lodAdjustSpeed: 0.2
   currentLODFactor: 1
+  boundsShape: 0
+  sphereRadius: 10
+  cylinderRadius: 10
+  cylinderHeight: 20
   debugDrawCells: 0
   debugDrawParticles: 0
   particleCount: 0
@@ -269,6 +275,31 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 82334fc7477ef6f4296747f8f5e7d884, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+--- !u!114 &304649985
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 304649980}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 9e319c96f62a32e489e2e4b2cd7a73db, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+--- !u!114 &304649986
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 304649980}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 05af1b40d191c2d4b90e7ed85b79d111, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  showDetailed: 0
 --- !u!1 &330585543
 GameObject:
   m_ObjectHideFlags: 0
