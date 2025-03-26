@@ -32,16 +32,17 @@ public class BoundsVisualizer : MonoBehaviour
     {
         simulation = GetComponent<GPUParticleSimulation>();
 
+        lineRenderer = gameObject.GetComponent<LineRenderer>();
         // Create line renderer if not present
         if (lineRenderer == null)
         {
             lineRenderer = gameObject.AddComponent<LineRenderer>();
             lineRenderer.material = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
-            lineRenderer.startColor = boundsColor;
-            lineRenderer.endColor = boundsColor;
-            lineRenderer.startWidth = 0.1f;
-            lineRenderer.endWidth = 0.1f;
         }
+        lineRenderer.startColor = boundsColor;
+        lineRenderer.endColor = boundsColor;
+        lineRenderer.startWidth = 0.1f;
+        lineRenderer.endWidth = 0.1f;
 
         // Initialize cached parameters
         lastBoundsShape = simulation.boundsShape;

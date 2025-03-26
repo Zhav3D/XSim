@@ -29,8 +29,7 @@ public class CameraController : MonoBehaviour
             y = -1;
 
         Vector3 direction = new Vector3(x, y, z) * m_MovementSpeed * (Input.GetKey(KeyCode.LeftShift) ? 2f : Input.GetKey(KeyCode.LeftControl) ? 0.5f : 1f) * Time.deltaTime;
-        transform.position += transform.TransformDirection(new Vector3(direction.x, 0f, direction.z));
-        transform.position += Vector3.up * direction.y;
+        transform.position += transform.TransformDirection(new Vector3(direction.x, direction.y, direction.z));
 
         transform.RotateAround(transform.position, transform.up, Input.GetAxis("Mouse X") * m_RotationSpeed);
         transform.RotateAround(transform.position, transform.right, -Input.GetAxis("Mouse Y") * m_RotationSpeed);
