@@ -6,6 +6,12 @@
 #pragma kernel IntegrateParticles
 #pragma kernel ResetGrid
 #pragma kernel ValidateParticles
+// LOD
+#pragma kernel IdentifyMergeCandidates
+#pragma kernel AssignParticlesToLODCells
+#pragma kernel CountLODCellParticles
+#pragma kernel CreateMergedParticles
+#pragma kernel CalculateHierarchicalForces
 
 // Particle data structure (must match C# struct layout)
 struct ParticleData
@@ -33,6 +39,26 @@ struct GridEntry
     int particleIndex;
 };
 
+// LOD
+struct MergedParticleData
+{
+    float3 position;
+    float3 velocity;
+    int typeIndex;
+    float mass;
+    float radius;
+    int parentCount;
+    int lodLevel;
+};
+
+struct LODCellAssignment
+{
+    int cellIndex;
+    int particleIndex;
+    int typeIndex;
+    int lodLevel;
+};
+
 // Particle buffers
 RWStructuredBuffer<ParticleData> Particles;
 StructuredBuffer<TypeData> ParticleTypes;
@@ -46,6 +72,12 @@ RWStructuredBuffer<int> GridOffsets;
 // Initialization buffers
 StructuredBuffer<int> TypeCounts;
 StructuredBuffer<int> TypeStartIndices;
+
+// LOD buffers
+RWStructuredBuffer<MergedParticleData> MergedParticles;
+RWStructuredBuffer<LODCellAssignment> LODCellAssignments;
+RWStructuredBuffer<int> LODCellCounts;
+RWStructuredBuffer<int> LODCellStartIndices;
 
 // Simulation parameters
 int GlobalRandomSeed;
@@ -86,6 +118,16 @@ float SphereRadius;
 float CylinderRadius;
 float CylinderHeight;
 
+// LOD
+bool EnableHierarchicalLOD;
+float LODDistanceThreshold;
+float LODDistanceMultiplier;
+int MaxLODLevels;
+int MaxMergedParticles;
+int TotalLODCells;
+int3 LODGridSize;
+float LODCellSize;
+
 // Random number functions
 uint wang_hash(uint seed)
 {
@@ -122,6 +164,27 @@ int CellToIndex(int3 cell)
 int GetCellIndex(float3 worldPos)
 {
     return CellToIndex(WorldToCell(worldPos));
+}
+
+// LOD Cell calculation
+int3 ParticleToLODCell(float3 position, int lodLevel)
+{
+    float cellSizeMultiplier = pow(LODDistanceMultiplier, lodLevel);
+    float lodCellSize = LODCellSize * cellSizeMultiplier;
+    
+    float3 normalizedPos = position + HalfBounds;
+    return int3(
+        clamp(int(normalizedPos.x / lodCellSize), 0, LODGridSize.x - 1),
+        clamp(int(normalizedPos.y / lodCellSize), 0, LODGridSize.y - 1),
+        clamp(int(normalizedPos.z / lodCellSize), 0, LODGridSize.z - 1)
+    );
+}
+
+int LODCellToIndex(int3 cell, int lodLevel)
+{
+    // Different LOD levels have different starting indices
+    int baseOffset = lodLevel * (LODGridSize.x * LODGridSize.y * LODGridSize.z);
+    return baseOffset + (cell.x + cell.y * LODGridSize.x + cell.z * LODGridSize.x * LODGridSize.y);
 }
 
 /////////////////////// KERNELS ///////////////////////
@@ -655,5 +718,194 @@ void ValidateParticles(uint3 id : SV_DispatchThreadID)
         particle.typeIndex = 0; // Reset to default type
     }
     
+    Particles[index] = particle;
+}
+
+// Identify which particles are candidates for merging
+[numthreads(64, 1, 1)]
+void IdentifyMergeCandidates(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= ActiveParticleCount)
+        return;
+        
+    ParticleData particle = Particles[index];
+    
+    // Skip inactive particles
+    if (particle.typeIndex < 0)
+        return;
+        
+    // Calculate distance from camera
+    float distFromCamera = length(particle.position - CameraPosition);
+    
+    // Determine LOD level based on distance
+    int lodLevel = 0;
+    if (EnableHierarchicalLOD && distFromCamera > LODDistanceThreshold)
+    {
+        // Calculate LOD level (further = higher level)
+        lodLevel = min(MaxLODLevels, int(log2(distFromCamera / LODDistanceThreshold) + 1));
+    }
+    
+    // Assign to LOD cell with type constraint
+    if (lodLevel > 0)
+    {
+        int3 lodCell = ParticleToLODCell(particle.position, lodLevel);
+        int cellIndex = LODCellToIndex(lodCell, lodLevel);
+        
+        LODCellAssignment assignment;
+        assignment.cellIndex = cellIndex;
+        assignment.particleIndex = index;
+        assignment.typeIndex = particle.typeIndex;
+        assignment.lodLevel = lodLevel;
+        
+        LODCellAssignments[index] = assignment;
+        
+        // Increment cell counter (atomic to handle thread race conditions)
+        InterlockedAdd(LODCellCounts[cellIndex], 1);
+    }
+    else
+    {
+        // Not a candidate for merging, mark with special value
+        LODCellAssignment assignment;
+        assignment.cellIndex = -1;
+        assignment.particleIndex = index;
+        assignment.typeIndex = particle.typeIndex;
+        assignment.lodLevel = 0;
+        
+        LODCellAssignments[index] = assignment;
+    }
+}
+
+// Create merged particles
+[numthreads(64, 1, 1)]
+void CreateMergedParticles(uint3 id : SV_DispatchThreadID)
+{
+    uint cellIndex = id.x;
+    if (cellIndex >= TotalLODCells)
+        return;
+        
+    int particleCount = LODCellCounts[cellIndex];
+    
+    // Only create merged particles if we have enough original particles
+    if (particleCount >= 5)
+    {
+        int startIndex = LODCellStartIndices[cellIndex];
+        
+        // Use atomic increment to get a unique index for the merged particle
+        int mergedIndex;
+        InterlockedAdd(MergedParticles[0].parentCount, 1, mergedIndex);
+        
+        if (mergedIndex < MaxMergedParticles)
+        {
+            // Get type from first particle (all particles in cell should be same type)
+            int firstParticleIndex = LODCellAssignments[startIndex].particleIndex;
+            int typeIndex = Particles[firstParticleIndex].typeIndex;
+            int lodLevel = LODCellAssignments[startIndex].lodLevel;
+            
+            // Accumulate properties
+            float3 weightedPos = float3(0, 0, 0);
+            float3 weightedVel = float3(0, 0, 0);
+            float totalMass = 0;
+            float avgRadius = 0;
+            
+            // Process all particles in this cell
+            for (int i = 0; i < particleCount; i++)
+            {
+                int assignmentIndex = startIndex + i;
+                if (assignmentIndex >= ActiveParticleCount)
+                    continue;
+                    
+                int particleIndex = LODCellAssignments[assignmentIndex].particleIndex;
+                ParticleData p = Particles[particleIndex];
+                
+                // Skip if different type (shouldn't happen, but safety check)
+                if (p.typeIndex != typeIndex)
+                    continue;
+                    
+                // Add mass-weighted properties
+                totalMass += p.mass;
+                weightedPos += p.position * p.mass;
+                weightedVel += p.velocity * p.mass;
+                avgRadius += p.radius;
+            }
+            
+            // Create merged particle
+            MergedParticleData merged;
+            merged.position = weightedPos / totalMass;
+            merged.velocity = weightedVel / totalMass;
+            merged.typeIndex = typeIndex;
+            merged.mass = totalMass;
+            merged.radius = pow(particleCount, 1.0 / 3.0) * (avgRadius / particleCount); // Volume-based scaling
+            merged.parentCount = particleCount;
+            merged.lodLevel = lodLevel;
+            
+            // Store in merged particle buffer
+            MergedParticles[mergedIndex] = merged;
+        }
+    }
+}
+
+// Calculate forces between original and merged particles
+[numthreads(64, 1, 1)]
+void CalculateHierarchicalForces(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= ActiveParticleCount)
+        return;
+        
+    ParticleData particle = Particles[index];
+    
+    // Skip inactive particles
+    if (particle.typeIndex < 0)
+        return;
+    
+    float3 position = particle.position;
+    float3 velocity = particle.velocity;
+    int typeIndex = particle.typeIndex;
+    
+    // Calculate total force from merged particles
+    float3 totalForce = float3(0, 0, 0);
+    
+    // Check interaction with merged particles
+    for (int i = 0; i < MaxMergedParticles; i++)
+    {
+        MergedParticleData mergedParticle = MergedParticles[i];
+        
+        // Skip invalid merged particles
+        if (mergedParticle.parentCount <= 0)
+            continue;
+            
+        // Calculate direction and distance
+        float3 direction = mergedParticle.position - position;
+        float distance = length(direction);
+        
+        // Skip if too far away
+        if (distance > InteractionRadius * pow(LODDistanceMultiplier, mergedParticle.lodLevel))
+            continue;
+            
+        // Prevent division by zero or extreme forces
+        if (distance < MinDistance)
+            distance = MinDistance;
+        
+        // Get attraction value from matrix (asymmetric - order matters)
+        int matrixIndex = typeIndex + mergedParticle.typeIndex * TypeCount;
+        float attraction = InteractionMatrix[matrixIndex];
+        
+        // Important: Scale force by merged particle's mass to maintain physical accuracy
+        float forceMagnitude = (attraction * InteractionStrength * mergedParticle.mass) / (distance * distance);
+        
+        // Apply force in the right direction
+        float3 normalizedDir = normalize(direction);
+        totalForce += normalizedDir * forceMagnitude;
+    }
+    
+    // Apply force as acceleration (F = ma, so a = F/m)
+    float3 acceleration = totalForce / particle.mass;
+    
+    // Update velocity
+    velocity += acceleration * DeltaTime;
+    
+    // Write back to buffer
+    particle.velocity = velocity;
     Particles[index] = particle;
 }

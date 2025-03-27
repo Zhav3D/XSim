@@ -1,0 +1,1016 @@
+// SimulationShader.compute
+// Main compute shader for The Powder Toy 3D simulation physics
+#pragma kernel SimulatePhysics
+#pragma kernel SimulateTemperature
+#pragma kernel SimulatePressure
+#pragma kernel SimulateReactions
+
+// Texture definitions
+RWTexture3D<float4> VoxelGrid; // r: element ID, g: lifetime, b: state flags, a: reserved
+RWTexture3D<float> TemperatureGrid; // Temperature in Celsius
+RWTexture3D<float> PressureGrid; // Pressure
+RWTexture3D<float4> VelocityGrid; // xyz: velocity, w: angular velocity
+
+// Constants and parameters
+float DeltaTime; // Time step
+float Time; // Global time
+float3 GridDimensions; // Grid dimensions
+float Gravity = 9.8; // Gravity strength
+float TemperatureDiffusionRate = 0.05; // How quickly heat spreads
+float PressureDiffusionRate = 0.1; // How quickly pressure spreads
+
+// Element property buffer structure (must match C# ElementProperties struct)
+struct ElementProperties
+{
+    // Physical properties
+    float Density;
+    float Viscosity;
+    float Elasticity;
+    float Friction;
+    
+    // State properties
+    int State;
+    float MeltingPoint;
+    float BoilingPoint;
+    float FreezingPoint;
+    float CondensationPoint;
+    
+    // Thermal properties
+    float DefaultTemperature;
+    float ThermalConductivity;
+    float SpecificHeat;
+    float HeatProduction;
+    
+    // Interaction properties
+    float Flammability;
+    float BurnTemperature;
+    float BurnRate;
+    
+    // Electrical properties
+    float Conductivity;
+    float ChargeCapacity;
+    
+    // Reaction properties
+    int ReactantElementId1;
+    float ReactionStrength1;
+    int ReactantElementId2;
+    float ReactionStrength2;
+    int ReactantElementId3;
+    float ReactionStrength3;
+    int ReactantElementId4;
+    float ReactionStrength4;
+    
+    // Result element when conditions are met
+    int MeltResultElementId;
+    int FreezeResultElementId;
+    int BurnResultElementId;
+    int EvaporateResultElementId;
+    int CondensingResultElementId;
+    
+    // Special behavior flags
+    int SpecialFlags;
+    
+    // Visualization properties
+    uint ColorDefault;
+    uint ColorHot;
+    uint ColorCold;
+};
+
+// Element property buffer
+StructuredBuffer<ElementProperties> ElementProperties;
+
+// Special element flag bit masks (must match C# ElementFlags enum)
+#define FLAG_EXPLOSIVE        (1 << 0)
+#define FLAG_RADIOACTIVE      (1 << 1)
+#define FLAG_CONDUCTIVE       (1 << 2)
+#define FLAG_REACTIVE         (1 << 3)
+#define FLAG_CORROSIVE        (1 << 4)
+#define FLAG_LIGHT_EMITTER    (1 << 5)
+#define FLAG_MAGNETIC         (1 << 6)
+#define FLAG_ANTIGRAVITY      (1 << 7)
+#define FLAG_INDESTRUCTIBLE   (1 << 8)
+#define FLAG_CLONEABLE        (1 << 9)
+#define FLAG_GROWS_PLANTS     (1 << 10)
+#define FLAG_SELF_REPLICATING (1 << 11)
+#define FLAG_STICKY           (1 << 12)
+#define FLAG_BOUNCY           (1 << 13)
+#define FLAG_TELEPORTING      (1 << 14)
+#define FLAG_QUANTUM          (1 << 15)
+
+// Element state constants
+#define STATE_EMPTY  -1
+#define STATE_SOLID   0
+#define STATE_POWDER  1
+#define STATE_LIQUID  2
+#define STATE_GAS     3
+#define STATE_SPECIAL 4
+
+// Helper function to get a voxel with bounds checking
+float4 GetVoxel(int3 pos)
+{
+    // Wrap coordinates for infinite simulation
+    pos.x = (pos.x + int(GridDimensions.x)) % int(GridDimensions.x);
+    pos.y = (pos.y + int(GridDimensions.y)) % int(GridDimensions.y);
+    pos.z = (pos.z + int(GridDimensions.z)) % int(GridDimensions.z);
+    
+    return VoxelGrid[pos];
+}
+
+// Helper function to set a voxel with bounds checking
+void SetVoxel(int3 pos, float4 value)
+{
+    // Wrap coordinates for infinite simulation
+    pos.x = (pos.x + int(GridDimensions.x)) % int(GridDimensions.x);
+    pos.y = (pos.y + int(GridDimensions.y)) % int(GridDimensions.y);
+    pos.z = (pos.z + int(GridDimensions.z)) % int(GridDimensions.z);
+    
+    VoxelGrid[pos] = value;
+}
+
+// Get temperature at a position
+float GetTemperature(int3 pos)
+{
+    pos.x = (pos.x + int(GridDimensions.x)) % int(GridDimensions.x);
+    pos.y = (pos.y + int(GridDimensions.y)) % int(GridDimensions.y);
+    pos.z = (pos.z + int(GridDimensions.z)) % int(GridDimensions.z);
+    
+    return TemperatureGrid[pos];
+}
+
+// Set temperature at a position
+void SetTemperature(int3 pos, float value)
+{
+    pos.x = (pos.x + int(GridDimensions.x)) % int(GridDimensions.x);
+    pos.y = (pos.y + int(GridDimensions.y)) % int(GridDimensions.y);
+    pos.z = (pos.z + int(GridDimensions.z)) % int(GridDimensions.z);
+    
+    TemperatureGrid[pos] = value;
+}
+
+// Get pressure at a position
+float GetPressure(int3 pos)
+{
+    pos.x = (pos.x + int(GridDimensions.x)) % int(GridDimensions.x);
+    pos.y = (pos.y + int(GridDimensions.y)) % int(GridDimensions.y);
+    pos.z = (pos.z + int(GridDimensions.z)) % int(GridDimensions.z);
+    
+    return PressureGrid[pos];
+}
+
+// Set pressure at a position
+void SetPressure(int3 pos, float value)
+{
+    pos.x = (pos.x + int(GridDimensions.x)) % int(GridDimensions.x);
+    pos.y = (pos.y + int(GridDimensions.y)) % int(GridDimensions.y);
+    pos.z = (pos.z + int(GridDimensions.z)) % int(GridDimensions.z);
+    
+    PressureGrid[pos] = value;
+}
+
+// Get velocity at a position
+float4 GetVelocity(int3 pos)
+{
+    pos.x = (pos.x + int(GridDimensions.x)) % int(GridDimensions.x);
+    pos.y = (pos.y + int(GridDimensions.y)) % int(GridDimensions.y);
+    pos.z = (pos.z + int(GridDimensions.z)) % int(GridDimensions.z);
+    
+    return VelocityGrid[pos];
+}
+
+// Set velocity at a position
+void SetVelocity(int3 pos, float4 value)
+{
+    pos.x = (pos.x + int(GridDimensions.x)) % int(GridDimensions.x);
+    pos.y = (pos.y + int(GridDimensions.y)) % int(GridDimensions.y);
+    pos.z = (pos.z + int(GridDimensions.z)) % int(GridDimensions.z);
+    
+    VelocityGrid[pos] = value;
+}
+
+// Random number generator based on position and time
+float Random(int3 pos, float seed)
+{
+    float x = pos.x + seed * 0.1;
+    float y = pos.y + Time * 0.3;
+    float z = pos.z + seed * 0.5;
+    return frac(sin(dot(float3(x, y, z), float3(12.9898, 78.233, 45.543))) * 43758.5453);
+}
+
+// Check if a cell is empty
+bool IsEmpty(int3 pos)
+{
+    return GetVoxel(pos).r <= 0.0f;
+}
+
+// Check if element has a specific flag
+bool HasFlag(int elementId, int flag)
+{
+    return (ElementProperties[elementId].SpecialFlags & flag) != 0;
+}
+
+// Check if two elements can swap positions based on their densities and states
+bool CanSwap(int elementIdA, int elementIdB)
+{
+    // Empty cells can always be replaced
+    if (elementIdB <= 0)
+        return true;
+    
+    // Can't replace indestructible elements
+    if (HasFlag(elementIdB, FLAG_INDESTRUCTIBLE))
+        return false;
+    
+    // Compare densities for liquids and powders
+    if (ElementProperties[elementIdA].State == STATE_LIQUID ||
+        ElementProperties[elementIdA].State == STATE_POWDER)
+    {
+        if (ElementProperties[elementIdB].State == STATE_LIQUID ||
+            ElementProperties[elementIdB].State == STATE_POWDER)
+        {
+            return ElementProperties[elementIdA].Density > ElementProperties[elementIdB].Density;
+        }
+    }
+    
+    // Gases can move through other gases
+    if (ElementProperties[elementIdA].State == STATE_GAS &&
+        ElementProperties[elementIdB].State == STATE_GAS)
+    {
+        return true;
+    }
+    
+    // Special elements like electricity can move through conductors
+    if (ElementProperties[elementIdA].State == STATE_SPECIAL &&
+        HasFlag(elementIdB, FLAG_CONDUCTIVE))
+    {
+        return true;
+    }
+    
+    return false;
+}
+
+// Helper function to apply pressure forces to velocity
+float3 ApplyPressureForces(int3 pos, float3 velocity)
+{
+    // Sample pressure at neighboring cells
+    float centerPressure = GetPressure(pos);
+    float rightPressure = GetPressure(pos + int3(1, 0, 0));
+    float leftPressure = GetPressure(pos + int3(-1, 0, 0));
+    float upPressure = GetPressure(pos + int3(0, 1, 0));
+    float downPressure = GetPressure(pos + int3(0, -1, 0));
+    float frontPressure = GetPressure(pos + int3(0, 0, 1));
+    float backPressure = GetPressure(pos + int3(0, 0, -1));
+    
+    // Calculate pressure gradients
+    float3 pressureGradient = float3(
+        leftPressure - rightPressure,
+        downPressure - upPressure,
+        backPressure - frontPressure
+    );
+    
+    // Apply pressure forces to velocity
+    return velocity + pressureGradient * DeltaTime * 0.1;
+}
+
+// Helper function for collision response
+float3 ResolveCollision(float3 velocity, float3 normal, float elasticity)
+{
+    float3 reflectedVelocity = reflect(velocity, normal);
+    return reflectedVelocity * elasticity;
+}
+
+// Color conversion helpers
+float4 UintToColor(uint color)
+{
+    float4 result;
+    result.r = float((color) & 0xFF) / 255.0;
+    result.g = float((color >> 8) & 0xFF) / 255.0;
+    result.b = float((color >> 16) & 0xFF) / 255.0;
+    result.a = float((color >> 24) & 0xFF) / 255.0;
+    return result;
+}
+
+// =============================================================================
+// KERNEL: Physics Simulation
+// =============================================================================
+[numthreads(8, 8, 8)]
+void SimulatePhysics(uint3 id : SV_DispatchThreadID)
+{
+    // Skip if out of bounds
+    if (any(id >= uint3(GridDimensions)))
+        return;
+    
+    // Get current cell data
+    float4 voxelData = VoxelGrid[id];
+    int elementId = int(voxelData.r);
+    
+    // Skip empty cells
+    if (elementId <= 0)
+        return;
+    
+    // Get element properties
+    ElementProperties props = ElementProperties[elementId];
+    
+    // Get current velocity
+    float4 velocityData = VelocityGrid[id];
+    float3 velocity = velocityData.xyz;
+    float angularVelocity = velocityData.w;
+    
+    // Skip if immovable
+    if (props.State == STATE_SOLID && !HasFlag(elementId, FLAG_BOUNCY))
+        return;
+    
+    // Apply gravity (unless antigravity)
+    if (!HasFlag(elementId, FLAG_ANTIGRAVITY))
+    {
+        // Different states respond differently to gravity
+        float gravityFactor = 1.0f;
+        
+        if (props.State == STATE_GAS)
+        {
+            gravityFactor = -0.2f; // Gases rise
+        }
+        else if (props.State == STATE_LIQUID)
+        {
+            gravityFactor = 1.0f;
+        }
+        else if (props.State == STATE_POWDER)
+        {
+            gravityFactor = 1.0f;
+        }
+        
+        velocity.y -= Gravity * gravityFactor * DeltaTime;
+    }
+    
+    // Apply pressure forces
+    velocity = ApplyPressureForces(id, velocity);
+    
+    // Apply viscosity (damping)
+    velocity *= (1.0 - props.Viscosity * DeltaTime);
+    
+    // Apply special behaviors
+    if (HasFlag(elementId, FLAG_BOUNCY))
+    {
+        // Bouncy elements have more elasticity
+        velocity *= (1.0 + props.Elasticity * 0.5 * DeltaTime);
+    }
+    
+    if (HasFlag(elementId, FLAG_MAGNETIC))
+    {
+        // Attract or repel other magnetic elements
+        // This is a simplified version - real magnetism would be more complex
+        for (int x = -3; x <= 3; x++)
+        {
+            for (int y = -3; y <= 3; y++)
+            {
+                for (int z = -3; z <= 3; z++)
+                {
+                    int3 checkPos = int3(id) + int3(x, y, z);
+                    float4 checkVoxel = GetVoxel(checkPos);
+                    int checkId = int(checkVoxel.r);
+                    
+                    if (checkId > 0 && HasFlag(checkId, FLAG_MAGNETIC))
+                    {
+                        float3 dir = normalize(float3(x, y, z) + 0.001);
+                        float dist = length(float3(x, y, z));
+                        float force = 0.2 / max(1.0, dist * dist);
+                        
+                        // Attract or repel based on a simple rule
+                        float polarity = sin(id.x * 0.1 + id.y * 0.2 + id.z * 0.3);
+                        float otherPolarity = sin(checkPos.x * 0.1 + checkPos.y * 0.2 + checkPos.z * 0.3);
+                        
+                        if (polarity * otherPolarity > 0)
+                        {
+                            // Attract
+                            velocity += dir * force * DeltaTime;
+                        }
+                        else
+                        {
+                            // Repel
+                            velocity -= dir * force * DeltaTime;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Calculate new position
+    float3 newPosF = float3(id) + velocity * DeltaTime;
+    int3 newPos = int3(round(newPosF));
+    
+    // Skip if new position is the same
+    if (all(newPos == int3(id)))
+        return;
+    
+    // Check if the new position is valid
+    if (newPos.x < 0 || newPos.x >= int(GridDimensions.x) ||
+        newPos.y < 0 || newPos.y >= int(GridDimensions.y) ||
+        newPos.z < 0 || newPos.z >= int(GridDimensions.z))
+    {
+        
+        // Bounce off bounds
+        float3 normal = float3(0, 0, 0);
+        
+        if (newPos.x < 0)
+            normal.x = 1;
+        if (newPos.x >= int(GridDimensions.x))
+            normal.x = -1;
+        if (newPos.y < 0)
+            normal.y = 1;
+        if (newPos.y >= int(GridDimensions.y))
+            normal.y = -1;
+        if (newPos.z < 0)
+            normal.z = 1;
+        if (newPos.z >= int(GridDimensions.z))
+            normal.z = -1;
+        
+        velocity = ResolveCollision(velocity, normalize(normal), props.Elasticity);
+        SetVelocity(id, float4(velocity, angularVelocity));
+        return;
+    }
+    
+    // Try to move to new position
+    float4 targetData = GetVoxel(newPos);
+    int targetId = int(targetData.r);
+    
+    if (CanSwap(elementId, targetId))
+    {
+        // Target cell is empty or can be displaced
+        
+        // Handle physical interaction
+        if (targetId > 0)
+        {
+            ElementProperties targetProps = ElementProperties[targetId];
+            
+            // Conservation of momentum for collisions
+            float4 targetVelocity = GetVelocity(newPos);
+            float m1 = props.Density;
+            float m2 = targetProps.Density;
+            float totalMass = m1 + m2;
+            
+            if (totalMass > 0)
+            {
+                float3 v1 = velocity;
+                float3 v2 = targetVelocity.xyz;
+                
+                velocity = (v1 * (m1 - m2) + 2 * m2 * v2) / totalMass;
+                targetVelocity.xyz = (v2 * (m2 - m1) + 2 * m1 * v1) / totalMass;
+                
+                // Apply friction
+                float frictionFactor = props.Friction * targetProps.Friction;
+                velocity *= (1.0 - frictionFactor * DeltaTime);
+                targetVelocity.xyz *= (1.0 - frictionFactor * DeltaTime);
+                
+                // Update target velocity
+                SetVelocity(newPos, targetVelocity);
+            }
+        }
+        
+        // Move current element to new position
+        SetVoxel(newPos, voxelData);
+        SetVelocity(newPos, float4(velocity, angularVelocity));
+        
+        // Clear original position
+        SetVoxel(id, float4(0, 0, 0, 0));
+        SetVelocity(id, float4(0, 0, 0, 0));
+    }
+    else
+    {
+        // Can't move to target cell, handle collision
+        float3 moveDir = normalize(float3(newPos) - float3(id) + float3(0.001, 0.001, 0.001));
+        velocity = ResolveCollision(velocity, -moveDir, props.Elasticity);
+        
+        // Try to find an alternative path (slide along surfaces)
+        float3 alternatives[6] =
+        {
+            float3(moveDir.x, 0, 0),
+            float3(0, moveDir.y, 0),
+            float3(0, 0, moveDir.z),
+            float3(moveDir.x, moveDir.y, 0),
+            float3(moveDir.x, 0, moveDir.z),
+            float3(0, moveDir.y, moveDir.z)
+        };
+        
+        bool moved = false;
+        for (int i = 0; i < 6; i++)
+        {
+            if (length(alternatives[i]) < 0.001)
+                continue;
+            
+            int3 altPos = int3(id) + int3(round(alternatives[i] * length(velocity) * DeltaTime));
+            if (all(altPos == int3(id)))
+                continue;
+            
+            // Check bounds
+            if (altPos.x < 0 || altPos.x >= int(GridDimensions.x) ||
+                altPos.y < 0 || altPos.y >= int(GridDimensions.y) ||
+                altPos.z < 0 || altPos.z >= int(GridDimensions.z))
+            {
+                continue;
+            }
+            
+            float4 altTarget = GetVoxel(altPos);
+            if (CanSwap(elementId, int(altTarget.r)))
+            {
+                // Move to alternative position
+                SetVoxel(altPos, voxelData);
+                SetVelocity(altPos, float4(velocity, angularVelocity));
+                
+                // Clear original position
+                SetVoxel(id, float4(0, 0, 0, 0));
+                SetVelocity(id, float4(0, 0, 0, 0));
+                moved = true;
+                break;
+            }
+        }
+        
+        if (!moved)
+        {
+            // Update velocity in place if couldn't move
+            SetVelocity(id, float4(velocity, angularVelocity));
+        }
+    }
+}
+
+// =============================================================================
+// KERNEL: Temperature Simulation
+// =============================================================================
+[numthreads(8, 8, 8)]
+void SimulateTemperature(uint3 id : SV_DispatchThreadID)
+{
+    // Skip if out of bounds
+    if (any(id >= uint3(GridDimensions)))
+        return;
+    
+    // Get current cell data
+    float4 voxelData = VoxelGrid[id];
+    int elementId = int(voxelData.r);
+    
+    // Skip empty cells
+    if (elementId <= 0)
+        return;
+    
+    // Get element properties
+    ElementProperties props = ElementProperties[elementId];
+    
+    // Get current temperature
+    float temperature = TemperatureGrid[id];
+    
+    // Elements with heat production
+    if (props.HeatProduction > 0)
+    {
+        temperature += props.HeatProduction * DeltaTime;
+    }
+    
+    // Apply heat diffusion
+    float heatDiffusion = 0;
+    float totalWeight = 0;
+    
+    for (int x = -1; x <= 1; x++)
+    {
+        for (int y = -1; y <= 1; y++)
+        {
+            for (int z = -1; z <= 1; z++)
+            {
+                // Skip center cell
+                if (x == 0 && y == 0 && z == 0)
+                    continue;
+                
+                int3 checkPos = int3(id) + int3(x, y, z);
+                float4 checkVoxel = GetVoxel(checkPos);
+                int neighborId = int(checkVoxel.r);
+                
+                if (neighborId > 0)
+                {
+                    float neighborTemp = GetTemperature(checkPos);
+                    float conductivity = (props.ThermalConductivity +
+                                         ElementProperties[neighborId].ThermalConductivity) * 0.5;
+                    
+                    float weight = conductivity / (x * x + y * y + z * z);
+                    heatDiffusion += (neighborTemp - temperature) * weight;
+                    totalWeight += weight;
+                }
+            }
+        }
+    }
+    
+    if (totalWeight > 0)
+    {
+        temperature += heatDiffusion * TemperatureDiffusionRate * DeltaTime;
+    }
+    
+    // Check for state changes based on temperature
+    int newElementId = elementId;
+    
+    // 1. Melting (solid to liquid)
+    if (props.State == STATE_SOLID && temperature > props.MeltingPoint && props.MeltResultElementId > 0)
+    {
+        newElementId = props.MeltResultElementId;
+    }
+    // 2. Freezing (liquid to solid)
+    else if (props.State == STATE_LIQUID && temperature < props.FreezingPoint && props.FreezeResultElementId > 0)
+    {
+        newElementId = props.FreezeResultElementId;
+    }
+    // 3. Boiling/Evaporating (liquid to gas)
+    else if (props.State == STATE_LIQUID && temperature > props.BoilingPoint && props.EvaporateResultElementId > 0)
+    {
+        newElementId = props.EvaporateResultElementId;
+    }
+    // 4. Condensing (gas to liquid)
+    else if (props.State == STATE_GAS && temperature < props.CondensationPoint && props.CondensingResultElementId > 0)
+    {
+        newElementId = props.CondensingResultElementId;
+    }
+    // 5. Burning
+    else if (props.Flammability > 0 && temperature > props.BurnTemperature)
+    {
+        // Chance to ignite based on flammability
+        float burnChance = props.Flammability * props.BurnRate * DeltaTime;
+        if (Random(id, 0) < burnChance && props.BurnResultElementId > 0)
+        {
+            newElementId = props.BurnResultElementId;
+            
+            // Heat produced by burning
+            temperature += 100.0f * DeltaTime;
+        }
+    }
+    
+    // Update element if it changed
+    if (newElementId != elementId)
+    {
+        // Get properties for new element
+        ElementProperties newProps = ElementProperties[newElementId];
+        
+        // Update voxel data with new element ID
+        voxelData.r = float(newElementId);
+        VoxelGrid[id] = voxelData;
+        
+        // Reset lifetime for new element
+        voxelData.g = 0;
+        VoxelGrid[id] = voxelData;
+        
+        // Adjust temperature based on state change
+        if (props.State != newProps.State)
+        {
+            // Temperature changes during state transitions (simplified)
+            if (props.State == STATE_SOLID && newProps.State == STATE_LIQUID)
+            {
+                // Melting absorbs heat
+                temperature = props.MeltingPoint;
+            }
+            else if (props.State == STATE_LIQUID && newProps.State == STATE_SOLID)
+            {
+                // Freezing releases heat
+                temperature = props.FreezingPoint;
+            }
+            else if (props.State == STATE_LIQUID && newProps.State == STATE_GAS)
+            {
+                // Evaporation absorbs heat
+                temperature = props.BoilingPoint;
+            }
+            else if (props.State == STATE_GAS && newProps.State == STATE_LIQUID)
+            {
+                // Condensation releases heat
+                temperature = props.CondensationPoint;
+            }
+        }
+    }
+    
+    // Update temperature
+    TemperatureGrid[id] = temperature;
+}
+
+// =============================================================================
+// KERNEL: Pressure Simulation
+// =============================================================================
+[numthreads(8, 8, 8)]
+void SimulatePressure(uint3 id : SV_DispatchThreadID)
+{
+    // Skip if out of bounds
+    if (any(id >= uint3(GridDimensions)))
+        return;
+    
+    // Get current cell data
+    float4 voxelData = VoxelGrid[id];
+    int elementId = int(voxelData.r);
+    
+    // Get current pressure
+    float pressure = PressureGrid[id];
+    
+    // Different elements affect pressure differently
+    if (elementId > 0)
+    {
+        ElementProperties props = ElementProperties[elementId];
+        
+        // Temperature affects pressure (ideal gas law approximation)
+        float temperature = TemperatureGrid[id];
+        float basePressure = 1.0;
+        
+        if (props.State == STATE_GAS)
+        {
+            // P = nRT/V (simplified)
+            pressure = basePressure * (temperature / 273.15);
+            
+            // Explosions create temporary pressure spikes
+            if (HasFlag(elementId, FLAG_EXPLOSIVE))
+            {
+                float explodeChance = 0.01 * DeltaTime;
+                if (temperature > props.BurnTemperature && Random(id, 1) < explodeChance)
+                {
+                    pressure += 10.0;
+                    
+                    // Create explosion
+                    for (int x = -2; x <= 2; x++)
+                    {
+                        for (int y = -2; y <= 2; y++)
+                        {
+                            for (int z = -2; z <= 2; z++)
+                            {
+                                int3 explosionPos = int3(id) + int3(x, y, z);
+                                SetTemperature(explosionPos, max(GetTemperature(explosionPos), 500.0));
+                                
+                                // Add outward velocity from explosion
+                                float4 expVelocity = GetVelocity(explosionPos);
+                                float3 expDir = normalize(float3(x, y, z) + float3(0.001, 0.001, 0.001));
+                                expVelocity.xyz += expDir * 10.0;
+                                SetVelocity(explosionPos, expVelocity);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        else if (props.State == STATE_LIQUID)
+        {
+            // Liquids create mild pressure based on stacking
+            int stackHeight = 0;
+            for (int y = 1; y < 10; y++)
+            {
+                int3 checkPos = int3(id.x, id.y + y, id.z);
+                float4 checkData = GetVoxel(checkPos);
+                if (int(checkData.r) == elementId)
+                {
+                    stackHeight++;
+                }
+                else
+                {
+                    break;
+                }
+            }
+            pressure = basePressure + stackHeight * 0.1;
+        }
+    }
+    
+    // Apply pressure diffusion
+    float pressureDiffusion = 0;
+    float totalWeight = 0;
+    
+    // Sample neighboring cells
+    for (int x = -1; x <= 1; x++)
+    {
+        for (int y = -1; y <= 1; y++)
+        {
+            for (int z = -1; z <= 1; z++)
+            {
+                // Skip center cell
+                if (x == 0 && y == 0 && z == 0)
+                    continue;
+                
+                int3 checkPos = int3(id) + int3(x, y, z);
+                float neighborPressure = GetPressure(checkPos);
+                
+                float weight = 1.0 / max(0.1, x * x + y * y + z * z);
+                pressureDiffusion += (neighborPressure - pressure) * weight;
+                totalWeight += weight;
+            }
+        }
+    }
+    
+    if (totalWeight > 0)
+    {
+        pressure += pressureDiffusion * PressureDiffusionRate * DeltaTime;
+    }
+    
+    // Update pressure
+    PressureGrid[id] = pressure;
+}
+
+// =============================================================================
+// KERNEL: Chemical Reactions Simulation
+// =============================================================================
+[numthreads(8, 8, 8)]
+void SimulateReactions(uint3 id : SV_DispatchThreadID)
+{
+    // Skip if out of bounds
+    if (any(id >= uint3(GridDimensions)))
+        return;
+    
+    // Get current cell data
+    float4 voxelData = VoxelGrid[id];
+    int elementId = int(voxelData.r);
+    
+    // Skip empty cells
+    if (elementId <= 0)
+        return;
+    
+    // Get element properties
+    ElementProperties props = ElementProperties[elementId];
+    
+    // Update element lifetime
+    float lifetime = voxelData.g + DeltaTime;
+    voxelData.g = lifetime;
+    VoxelGrid[id] = voxelData;
+    
+    // Skip if not reactive
+    if (!HasFlag(elementId, FLAG_REACTIVE) &&
+        props.ReactantElementId1 <= 0 &&
+        props.ReactantElementId2 <= 0 &&
+        props.ReactantElementId3 <= 0 &&
+        props.ReactantElementId4 <= 0)
+    {
+        return;
+    }
+    
+    // Get temperature and pressure
+    float temperature = TemperatureGrid[id];
+    float pressure = PressureGrid[id];
+    
+    // Check for reactions with neighboring cells
+    for (int x = -1; x <= 1; x++)
+    {
+        for (int y = -1; y <= 1; y++)
+        {
+            for (int z = -1; z <= 1; z++)
+            {
+                // Skip center cell
+                if (x == 0 && y == 0 && z == 0)
+                    continue;
+                
+                int3 checkPos = int3(id) + int3(x, y, z);
+                float4 checkVoxel = GetVoxel(checkPos);
+                int neighborId = int(checkVoxel.r);
+                
+                if (neighborId <= 0)
+                    continue;
+                
+                bool reacted = false;
+                
+                // Check for defined reactions
+                if (props.ReactantElementId1 > 0 && props.ReactantElementId1 == neighborId)
+                {
+                    // React based on reaction strength
+                    if (Random(id + checkPos, 2) < props.ReactionStrength1 * DeltaTime)
+                    {
+                        reacted = true;
+                    }
+                }
+                else if (props.ReactantElementId2 > 0 && props.ReactantElementId2 == neighborId)
+                {
+                    if (Random(id + checkPos, 3) < props.ReactionStrength2 * DeltaTime)
+                    {
+                        reacted = true;
+                    }
+                }
+                else if (props.ReactantElementId3 > 0 && props.ReactantElementId3 == neighborId)
+                {
+                    if (Random(id + checkPos, 4) < props.ReactionStrength3 * DeltaTime)
+                    {
+                        reacted = true;
+                    }
+                }
+                else if (props.ReactantElementId4 > 0 && props.ReactantElementId4 == neighborId)
+                {
+                    if (Random(id + checkPos, 5) < props.ReactionStrength4 * DeltaTime)
+                    {
+                        reacted = true;
+                    }
+                }
+                
+                // Special reactions for specific element combinations
+                if (!reacted)
+                {
+                    // Example: Water + Fire = Steam
+                    if ((elementId == 200 && neighborId == 302) ||
+                        (elementId == 302 && neighborId == 200))
+                    {
+                        if (Random(id + checkPos, 6) < 0.8 * DeltaTime)
+                        {
+                            // Convert water to steam
+                            reacted = true;
+                            // Find which cell is water
+                            int3 waterPos = (elementId == 200) ? id : checkPos;
+                            // Convert water to steam
+                            SetVoxel(waterPos, float4(300, 0, 0, 0));
+                            SetTemperature(waterPos, 110);
+                            // Extinguish fire
+                            int3 firePos = (elementId == 302) ? id : checkPos;
+                            SetVoxel(firePos, float4(0, 0, 0, 0));
+                        }
+                    }
+                    // Example: Water + Lava = Stone + Steam
+                    else if ((elementId == 200 && neighborId == 203) ||
+                             (elementId == 203 && neighborId == 200))
+                    {
+                        if (Random(id + checkPos, 7) < 0.7 * DeltaTime)
+                        {
+                            // Find lava and water cells
+                            int3 lavaPos = (elementId == 203) ? id : checkPos;
+                            int3 waterPos = (elementId == 200) ? id : checkPos;
+                            
+                            // Convert lava to stone
+                            SetVoxel(lavaPos, float4(5, 0, 0, 0)); // Stone
+                            SetTemperature(lavaPos, 100);
+                            
+                            // Convert water to steam
+                            SetVoxel(waterPos, float4(300, 0, 0, 0)); // Steam
+                            SetTemperature(waterPos, 110);
+                            
+                            reacted = true;
+                        }
+                    }
+                }
+                
+                // Self-replicating elements
+                if (HasFlag(elementId, FLAG_SELF_REPLICATING) && IsEmpty(checkPos))
+                {
+                    if (Random(id + checkPos, 8) < 0.1 * DeltaTime)
+                    {
+                        // Replicate to empty cell
+                        SetVoxel(checkPos, float4(elementId, 0, 0, 0));
+                        SetTemperature(checkPos, temperature);
+                    }
+                }
+                
+                // Radioactive elements
+                if (HasFlag(elementId, FLAG_RADIOACTIVE))
+                {
+                    if (Random(id + checkPos, 9) < 0.2 * DeltaTime)
+                    {
+                        // Increase temperature in nearby cells
+                        SetTemperature(checkPos, GetTemperature(checkPos) + 5.0);
+                        
+                        // Chance to transmute neighboring elements
+                        if (Random(id + checkPos, 10) < 0.05)
+                        {
+                            int transmuteResult = int(Random(id + checkPos, 11) * 10) + 100;
+                            SetVoxel(checkPos, float4(transmuteResult, 0, 0, 0));
+                        }
+                    }
+                }
+                
+                // Corrosive elements
+                if (HasFlag(elementId, FLAG_CORROSIVE))
+                {
+                    if (Random(id + checkPos, 12) < 0.3 * DeltaTime)
+                    {
+                        // Dissolve neighboring elements except indestructible
+                        if (!HasFlag(neighborId, FLAG_INDESTRUCTIBLE))
+                        {
+                            SetVoxel(checkPos, float4(0, 0, 0, 0));
+                            // Corrosion weakens the acid
+                            voxelData.g += 0.1;
+                            VoxelGrid[id] = voxelData;
+                            
+                            // If acid has dissolved enough, it disappears
+                            if (voxelData.g > 10.0)
+                            {
+                                SetVoxel(id, float4(0, 0, 0, 0));
+                            }
+                        }
+                    }
+                }
+                
+                // If a reaction occurred, we can stop checking neighbors
+                if (reacted)
+                {
+                    break;
+                }
+            }
+            if (voxelData.r <= 0)
+                break; // Element was consumed
+        }
+        if (voxelData.r <= 0)
+            break; // Element was consumed
+    }
+    
+    // Special element lifetime behaviors
+    if (props.State == STATE_SPECIAL)
+    {
+        if (elementId == 400)
+        { // Electricity
+            // Electricity dissipates over time
+            if (lifetime > 0.2 && Random(id, 13) < 0.7 * DeltaTime)
+            {
+                SetVoxel(id, float4(0, 0, 0, 0));
+            }
+        }
+        else if (elementId == 302)
+        { // Fire
+            // Fire burns out after a while
+            if (lifetime > 2.0 && Random(id, 14) < 0.3 * DeltaTime)
+            {
+                SetVoxel(id, float4(301, 0, 0, 0)); // Turn into smoke
+            }
+        }
+    }
+}

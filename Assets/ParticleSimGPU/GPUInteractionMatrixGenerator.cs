@@ -931,7 +931,6 @@ public class GPUInteractionMatrixGenerator : MonoBehaviour
                 simulation.maxVelocity = 20f;
                 simulation.interactionRadius = 10f;
                 simulation.cellSize = 2.5f;
-                simulation.enableLOD = true;
                 break;
 
             case PatternType.Clusters:
@@ -944,7 +943,6 @@ public class GPUInteractionMatrixGenerator : MonoBehaviour
                 simulation.maxVelocity = 15f;
                 simulation.interactionRadius = 12f;
                 simulation.cellSize = 3.0f;
-                simulation.enableLOD = true;
                 break;
 
             case PatternType.Chains:
@@ -957,7 +955,6 @@ public class GPUInteractionMatrixGenerator : MonoBehaviour
                 simulation.maxVelocity = 18f;
                 simulation.interactionRadius = 15f;
                 simulation.cellSize = 3.75f;
-                simulation.enableLOD = true;
                 break;
 
             case PatternType.PredatorPrey:
@@ -970,7 +967,6 @@ public class GPUInteractionMatrixGenerator : MonoBehaviour
                 simulation.maxVelocity = 25f;
                 simulation.interactionRadius = 10f;
                 simulation.cellSize = 2.5f;
-                simulation.enableLOD = true;
                 break;
 
             case PatternType.Crystalline:
@@ -983,7 +979,6 @@ public class GPUInteractionMatrixGenerator : MonoBehaviour
                 simulation.maxVelocity = 15f;
                 simulation.interactionRadius = 8f;
                 simulation.cellSize = 2.0f;
-                simulation.enableLOD = true;
                 break;
 
             case PatternType.Flocking:
@@ -996,7 +991,6 @@ public class GPUInteractionMatrixGenerator : MonoBehaviour
                 simulation.maxVelocity = 20f;
                 simulation.interactionRadius = 12f;
                 simulation.cellSize = 3.0f;
-                simulation.enableLOD = true;
                 break;
 
             case PatternType.Lenia:
@@ -1009,7 +1003,6 @@ public class GPUInteractionMatrixGenerator : MonoBehaviour
                 simulation.maxVelocity = 12f;
                 simulation.interactionRadius = 15f;
                 simulation.cellSize = 3.75f;
-                simulation.enableLOD = true;
                 break;
 
             case PatternType.Segregation:
@@ -1022,7 +1015,6 @@ public class GPUInteractionMatrixGenerator : MonoBehaviour
                 simulation.maxVelocity = 18f;
                 simulation.interactionRadius = 10f;
                 simulation.cellSize = 2.5f;
-                simulation.enableLOD = true;
                 break;
         }
     }

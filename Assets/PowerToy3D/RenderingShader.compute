@@ -1,0 +1,816 @@
+// RenderingShader.compute
+// Handles all visualization processing for The Powder Toy 3D
+#pragma kernel PrepareVolumeData
+#pragma kernel GenerateMarchingCubes
+#pragma kernel FindVisibleParticles
+
+// Input textures from simulation
+Texture3D<float4> VoxelGrid; // r: element ID, g: lifetime, b: state flags, a: reserved
+Texture3D<float> TemperatureGrid; // Temperature in Celsius
+Texture3D<float> PressureGrid; // Pressure
+Texture3D<float4> VelocityGrid; // xyz: velocity, w: angular velocity
+
+// Output textures for rendering
+RWTexture3D<float4> ColorVolume; // RGB: color, A: density
+RWTexture3D<float> DensityVolume; // Density for volume rendering / marching cubes
+
+// Parameters
+float3 GridDimensions; // Grid dimensions
+float CurrentLOD; // Current level of detail (0-1)
+bool ShowTemperature; // Show temperature as color
+bool ShowPressure; // Show pressure as color
+bool EnableEmission; // Enable emission for hot elements
+float Time; // Current simulation time
+
+// Marching Cubes parameters
+float IsoLevel = 0.5; // Surface threshold level
+RWStructuredBuffer<float3> Vertices; // Output vertices
+RWStructuredBuffer<int> Triangles; // Output triangle indices
+RWStructuredBuffer<int> VertexTriangleCounter; // Counter for vertices and triangles
+
+// Instanced rendering parameters
+struct InstanceData
+{
+    float3 position;
+    float scale;
+    float4 color;
+};
+RWStructuredBuffer<InstanceData> InstanceData; // Instance data for GPU instancing
+RWStructuredBuffer<uint> DrawArgs; // Indirect draw arguments
+
+// Camera parameters for culling
+float3 CameraPosition;
+float3 CameraForward;
+float CameraFOV;
+float MaxRenderDistance;
+float ParticleScale;
+float DensityCutoff;
+
+// Marching Cubes tables
+static const int numVerticesPerVoxel = 12;
+static const int triTable[256][16] =
+{
+    // Triangulation table data
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 8, 3, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 2, 10, 0, 2, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 2, 8, 3, 2, 10, 8, 10, 9, 8, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 11, 2, 8, 11, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 9, 0, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 11, 2, 1, 9, 11, 9, 8, 11, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 10, 1, 11, 10, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 10, 1, 0, 8, 10, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 9, 0, 3, 11, 9, 11, 10, 9, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 3, 0, 7, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 1, 9, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 1, 9, 4, 7, 1, 7, 3, 1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 2, 10, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 4, 7, 3, 0, 4, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 2, 10, 9, 0, 2, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1 },
+    { 2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, -1, -1, -1, -1 },
+    { 8, 4, 7, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 11, 4, 7, 11, 2, 4, 2, 0, 4, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 0, 1, 8, 4, 7, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, -1, -1, -1, -1 },
+    { 3, 10, 1, 3, 11, 10, 7, 8, 4, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, -1, -1, -1, -1 },
+    { 4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, -1, -1, -1, -1 },
+    { 4, 7, 11, 4, 11, 9, 9, 11, 10, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 5, 4, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 5, 4, 1, 5, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 8, 5, 4, 8, 3, 5, 3, 1, 5, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 2, 10, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 0, 8, 1, 2, 10, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1 },
+    { 5, 2, 10, 5, 4, 2, 4, 0, 2, -1, -1, -1, -1, -1, -1, -1 },
+    { 2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, -1, -1, -1, -1 },
+    { 9, 5, 4, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 11, 2, 0, 8, 11, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 5, 4, 0, 1, 5, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1 },
+    { 2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, -1, -1, -1, -1 },
+    { 10, 3, 11, 10, 1, 3, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, -1, -1, -1, -1 },
+    { 5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, -1, -1, -1, -1 },
+    { 5, 4, 8, 5, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 7, 8, 5, 7, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 3, 0, 9, 5, 3, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 7, 8, 0, 1, 7, 1, 5, 7, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 7, 8, 9, 5, 7, 10, 1, 2, -1, -1, -1, -1, -1, -1, -1 },
+    { 10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, -1, -1, -1, -1 },
+    { 8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, -1, -1, -1, -1 },
+    { 2, 10, 5, 2, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1 },
+    { 7, 9, 5, 7, 8, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, -1, -1, -1, -1 },
+    { 2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, -1, -1, -1, -1 },
+    { 11, 2, 1, 11, 1, 7, 7, 1, 5, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, -1, -1, -1, -1 },
+    { 5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0, -1 },
+    { 11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0, -1 },
+    { 11, 10, 5, 7, 11, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 8, 3, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 0, 1, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 8, 3, 1, 9, 8, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 6, 5, 2, 6, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 6, 5, 1, 2, 6, 3, 0, 8, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 6, 5, 9, 0, 6, 0, 2, 6, -1, -1, -1, -1, -1, -1, -1 },
+    { 5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, -1, -1, -1, -1 },
+    { 2, 3, 11, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 11, 0, 8, 11, 2, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 1, 9, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1 },
+    { 5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, -1, -1, -1, -1 },
+    { 6, 3, 11, 6, 5, 3, 5, 1, 3, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, -1, -1, -1, -1 },
+    { 3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, -1, -1, -1, -1 },
+    { 6, 5, 9, 6, 9, 11, 11, 9, 8, -1, -1, -1, -1, -1, -1, -1 },
+    { 5, 10, 6, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 3, 0, 4, 7, 3, 6, 5, 10, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 9, 0, 5, 10, 6, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1 },
+    { 10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, -1, -1, -1, -1 },
+    { 6, 1, 2, 6, 5, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, -1, -1, -1, -1 },
+    { 8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, -1, -1, -1, -1 },
+    { 7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9, -1 },
+    { 3, 11, 2, 7, 8, 4, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1 },
+    { 5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, -1, -1, -1, -1 },
+    { 0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1 },
+    { 9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6, -1 },
+    { 8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, -1, -1, -1, -1 },
+    { 5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11, -1 },
+    { 0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7, -1 },
+    { 6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, -1, -1, -1, -1 },
+    { 10, 4, 9, 6, 4, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 10, 6, 4, 9, 10, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1 },
+    { 10, 0, 1, 10, 6, 0, 6, 4, 0, -1, -1, -1, -1, -1, -1, -1 },
+    { 8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, -1, -1, -1, -1 },
+    { 1, 4, 9, 1, 2, 4, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, -1, -1, -1, -1 },
+    { 0, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 8, 3, 2, 8, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1 },
+    { 10, 4, 9, 10, 6, 4, 11, 2, 3, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, -1, -1, -1, -1 },
+    { 3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, -1, -1, -1, -1 },
+    { 6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1, -1 },
+    { 9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, -1, -1, -1, -1 },
+    { 8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1, -1 },
+    { 3, 11, 6, 3, 6, 0, 0, 6, 4, -1, -1, -1, -1, -1, -1, -1 },
+    { 6, 4, 8, 11, 6, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 7, 10, 6, 7, 8, 10, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, -1, -1, -1, -1 },
+    { 10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, -1, -1, -1, -1 },
+    { 10, 6, 7, 10, 7, 1, 1, 7, 3, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, -1, -1, -1, -1 },
+    { 2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9, -1 },
+    { 7, 8, 0, 7, 0, 6, 6, 0, 2, -1, -1, -1, -1, -1, -1, -1 },
+    { 7, 3, 2, 6, 7, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, -1, -1, -1, -1 },
+    { 2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7, -1 },
+    { 1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11, -1 },
+    { 11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, -1, -1, -1, -1 },
+    { 8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6, -1 },
+    { 0, 9, 1, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, -1, -1, -1, -1 },
+    { 7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 0, 8, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 1, 9, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 8, 1, 9, 8, 3, 1, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1 },
+    { 10, 1, 2, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 2, 10, 3, 0, 8, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1 },
+    { 2, 9, 0, 2, 10, 9, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1 },
+    { 6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, -1, -1, -1, -1 },
+    { 7, 2, 3, 6, 2, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 7, 0, 8, 7, 6, 0, 6, 2, 0, -1, -1, -1, -1, -1, -1, -1 },
+    { 2, 7, 6, 2, 3, 7, 0, 1, 9, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, -1, -1, -1, -1 },
+    { 10, 7, 6, 10, 1, 7, 1, 3, 7, -1, -1, -1, -1, -1, -1, -1 },
+    { 10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, -1, -1, -1, -1 },
+    { 0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, -1, -1, -1, -1 },
+    { 7, 6, 10, 7, 10, 8, 8, 10, 9, -1, -1, -1, -1, -1, -1, -1 },
+    { 6, 8, 4, 11, 8, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 6, 11, 3, 0, 6, 0, 4, 6, -1, -1, -1, -1, -1, -1, -1 },
+    { 8, 6, 11, 8, 4, 6, 9, 0, 1, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, -1, -1, -1, -1 },
+    { 6, 8, 4, 6, 11, 8, 2, 10, 1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, -1, -1, -1, -1 },
+    { 4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, -1, -1, -1, -1 },
+    { 10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3, -1 },
+    { 8, 2, 3, 8, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, -1, -1, -1, -1 },
+    { 1, 9, 4, 1, 4, 2, 2, 4, 6, -1, -1, -1, -1, -1, -1, -1 },
+    { 8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, -1, -1, -1, -1 },
+    { 10, 1, 0, 10, 0, 6, 6, 0, 4, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3, -1 },
+    { 10, 9, 4, 6, 10, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 9, 5, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 8, 3, 4, 9, 5, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1 },
+    { 5, 0, 1, 5, 4, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1 },
+    { 11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, -1, -1, -1, -1 },
+    { 9, 5, 4, 10, 1, 2, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1 },
+    { 6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, -1, -1, -1, -1 },
+    { 7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, -1, -1, -1, -1 },
+    { 3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6, -1 },
+    { 7, 2, 3, 7, 6, 2, 5, 4, 9, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, -1, -1, -1, -1 },
+    { 3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, -1, -1, -1, -1 },
+    { 6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8, -1 },
+    { 9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, -1, -1, -1, -1 },
+    { 1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4, -1 },
+    { 4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10, -1 },
+    { 7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, -1, -1, -1, -1 },
+    { 6, 9, 5, 6, 11, 9, 11, 8, 9, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, -1, -1, -1, -1 },
+    { 0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, -1, -1, -1, -1 },
+    { 6, 11, 3, 6, 3, 5, 5, 3, 1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, -1, -1, -1, -1 },
+    { 0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10, -1 },
+    { 11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5, -1 },
+    { 6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, -1, -1, -1, -1 },
+    { 5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, -1, -1, -1, -1 },
+    { 9, 5, 6, 9, 6, 0, 0, 6, 2, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8, -1 },
+    { 1, 5, 6, 2, 1, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6, -1 },
+    { 10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, -1, -1, -1, -1 },
+    { 0, 3, 8, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 10, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 11, 5, 10, 7, 5, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 11, 5, 10, 11, 7, 5, 8, 3, 0, -1, -1, -1, -1, -1, -1, -1 },
+    { 5, 11, 7, 5, 10, 11, 1, 9, 0, -1, -1, -1, -1, -1, -1, -1 },
+    { 10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, -1, -1, -1, -1 },
+    { 11, 1, 2, 11, 7, 1, 7, 5, 1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, -1, -1, -1, -1 },
+    { 9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, -1, -1, -1, -1 },
+    { 7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2, -1 },
+    { 2, 5, 10, 2, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1 },
+    { 8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, -1, -1, -1, -1 },
+    { 9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, -1, -1, -1, -1 },
+    { 9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2, -1 },
+    { 1, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 8, 7, 0, 7, 1, 1, 7, 5, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 0, 3, 9, 3, 5, 5, 3, 7, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 8, 7, 5, 9, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 5, 8, 4, 5, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1 },
+    { 5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, -1, -1, -1, -1 },
+    { 0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, -1, -1, -1, -1 },
+    { 10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4, -1 },
+    { 2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, -1, -1, -1, -1 },
+    { 0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11, -1 },
+    { 0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5, -1 },
+    { 9, 4, 5, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, -1, -1, -1, -1 },
+    { 5, 10, 2, 5, 2, 4, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9, -1 },
+    { 5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, -1, -1, -1, -1 },
+    { 8, 4, 5, 8, 5, 3, 3, 5, 1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 4, 5, 1, 0, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, -1, -1, -1, -1 },
+    { 9, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 11, 7, 4, 9, 11, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1, -1, -1, -1 },
+    { 1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1, -1, -1, -1 },
+    { 3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, -1 },
+    { 4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1, -1, -1, -1 },
+    { 9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, -1 },
+    { 11, 7, 4, 11, 4, 2, 2, 4, 0, -1, -1, -1, -1, -1, -1, -1 },
+    { 11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, -1, -1, -1, -1 },
+    { 2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, -1, -1, -1, -1 },
+    { 9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7, -1 },
+    { 3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10, -1 },
+    { 1, 10, 2, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 9, 1, 4, 1, 7, 7, 1, 3, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, -1, -1, -1, -1 },
+    { 4, 0, 3, 7, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 4, 8, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 0, 9, 3, 9, 11, 11, 9, 10, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 1, 10, 0, 10, 8, 8, 10, 11, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 1, 10, 11, 3, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 2, 11, 1, 11, 9, 9, 11, 8, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, -1, -1, -1, -1 },
+    { 0, 2, 11, 8, 0, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 3, 2, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 2, 3, 8, 2, 8, 10, 10, 8, 9, -1, -1, -1, -1, -1, -1, -1 },
+    { 9, 10, 2, 0, 9, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, -1, -1, -1, -1 },
+    { 1, 10, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { 0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 }
+};
+
+static const int edgeTable[256] =
+{
+    0x0, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
+    0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+    0x190, 0x99, 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
+    0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+    0x230, 0x339, 0x33, 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+    0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+    0x3a0, 0x2a9, 0x1a3, 0xaa, 0x7a6, 0x6af, 0x5a5, 0x4ac,
+    0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+    0x460, 0x569, 0x663, 0x76a, 0x66, 0x16f, 0x265, 0x36c,
+    0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff, 0x3f5, 0x2fc,
+    0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55, 0x15c,
+    0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc,
+    0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
+    0xcc, 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
+    0x15c, 0x55, 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
+    0x2fc, 0x3f5, 0xff, 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
+    0x36c, 0x265, 0x16f, 0x66, 0x76a, 0x663, 0x569, 0x460,
+    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
+    0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa, 0x1a3, 0x2a9, 0x3a0,
+    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
+    0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33, 0x339, 0x230,
+    0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
+    0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99, 0x190,
+    0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
+    0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0
+};
+
+// Edge vertex interpolation for marching cubes
+float3 VertexInterp(float isolevel, float3 p1, float3 p2, float v1, float v2)
+{
+    if (abs(isolevel - v1) < 0.00001)
+        return p1;
+    if (abs(isolevel - v2) < 0.00001)
+        return p2;
+    if (abs(v1 - v2) < 0.00001)
+        return p1;
+    
+    float t = (isolevel - v1) / (v2 - v1);
+    return p1 + t * (p2 - p1);
+}
+
+// Helper function to get element color based on ID
+float4 GetElementColor(int elementId, float temperature)
+{
+    // Simple color mapping
+    float4 baseColor = float4(0, 0, 0, 0);
+    
+    if (elementId <= 0)
+        return baseColor; // Empty
+    
+    // Solids (1-99)
+    if (elementId < 100)
+    {
+        if (elementId == 1) // Wall
+            baseColor = float4(0.5, 0.5, 0.5, 1.0);
+        else if (elementId == 2) // Wood
+            baseColor = float4(0.54, 0.27, 0.07, 1.0);
+        else if (elementId == 3) // Metal
+            baseColor = float4(0.7, 0.7, 0.7, 1.0);
+        else if (elementId == 4) // Glass
+            baseColor = float4(0.8, 0.9, 0.95, 0.7);
+        else if (elementId == 5) // Stone
+            baseColor = float4(0.5, 0.5, 0.5, 1.0);
+        else if (elementId == 6) // Ice
+            baseColor = float4(0.8, 0.9, 1.0, 0.8);
+        else if (elementId == 7) // C4
+            baseColor = float4(0.8, 0.75, 0.6, 1.0);
+    }
+    // Powders (100-199)
+    else if (elementId < 200)
+    {
+        if (elementId == 100) // Sand
+            baseColor = float4(0.94, 0.85, 0.54, 1.0);
+        else if (elementId == 101) // Salt
+            baseColor = float4(1.0, 1.0, 1.0, 1.0);
+        else if (elementId == 102) // Coal
+            baseColor = float4(0.1, 0.1, 0.1, 1.0);
+        else if (elementId == 103) // Gunpowder
+            baseColor = float4(0.2, 0.2, 0.2, 1.0);
+        else if (elementId == 500) // Snow
+            baseColor = float4(1.0, 1.0, 1.0, 0.95);
+        else if (elementId == 501) // Concrete
+            baseColor = float4(0.65, 0.65, 0.65, 1.0);
+    }
+    // Liquids (200-299)
+    else if (elementId < 300)
+    {
+        if (elementId == 200) // Water
+            baseColor = float4(0.2, 0.5, 0.8, 0.8);
+        else if (elementId == 201) // Oil
+            baseColor = float4(0.4, 0.35, 0.2, 0.85);
+        else if (elementId == 202) // Acid
+            baseColor = float4(0.8, 1.0, 0.2, 0.9);
+        else if (elementId == 203) // Lava
+            baseColor = float4(1.0, 0.4, 0.1, 1.0);
+        else if (elementId == 502) // Gel
+            baseColor = float4(0.3, 0.8, 0.3, 0.8);
+        else if (elementId == 503) // Slime
+            baseColor = float4(0.4, 0.9, 0.4, 0.85);
+        else if (elementId == 504) // Mercury
+            baseColor = float4(0.8, 0.8, 0.85, 1.0);
+    }
+    // Gases (300-399)
+    else if (elementId < 400)
+    {
+        if (elementId == 300) // Steam
+            baseColor = float4(0.9, 0.9, 0.9, 0.5);
+        else if (elementId == 301) // Smoke
+            baseColor = float4(0.3, 0.3, 0.3, 0.7);
+        else if (elementId == 302) // Fire
+            baseColor = float4(1.0, 0.5, 0.1, 0.8);
+        else if (elementId == 303) // Methane
+            baseColor = float4(0.9, 0.9, 0.6, 0.3);
+    }
+    // Special (400+)
+    else if (elementId < 500)
+    {
+        if (elementId == 400) // Electricity
+            baseColor = float4(1.0, 1.0, 0.2, 0.9);
+        else if (elementId == 401) // Plasma
+            baseColor = float4(0.7, 0.3, 1.0, 0.8);
+        else if (elementId == 402) // Neutron
+            baseColor = float4(0.0, 1.0, 0.5, 0.5);
+        else if (elementId == 505) // Biomass
+            baseColor = float4(0.2, 0.6, 0.2, 1.0);
+    }
+    
+    // Apply temperature coloring if showing temperature
+    if (ShowTemperature)
+    {
+        // Hot elements become more red/yellow
+        if (temperature > 100.0)
+        {
+            float tempFactor = min(1.0, (temperature - 100.0) / 900.0);
+            baseColor.r = lerp(baseColor.r, 1.0, tempFactor * 0.7);
+            baseColor.g = lerp(baseColor.g, 0.7, tempFactor * 0.5);
+            baseColor.b = lerp(baseColor.b, 0.2, tempFactor * 0.7);
+            
+            // Glow effect for very hot elements
+            if (temperature > 400.0 && EnableEmission)
+            {
+                float glowFactor = min(1.0, (temperature - 400.0) / 1000.0);
+                baseColor.rgb = lerp(baseColor.rgb, float3(1.0, 0.8, 0.5), glowFactor * 0.5);
+                baseColor.a = min(1.0, baseColor.a + glowFactor * 0.3);
+            }
+        }
+        // Cold elements become more blue
+        else if (temperature < 0.0)
+        {
+            float tempFactor = min(1.0, -temperature / 100.0);
+            baseColor.r = lerp(baseColor.r, 0.3, tempFactor * 0.5);
+            baseColor.g = lerp(baseColor.g, 0.5, tempFactor * 0.3);
+            baseColor.b = lerp(baseColor.b, 1.0, tempFactor * 0.5);
+        }
+    }
+    
+    return baseColor;
+}
+
+// =============================================================================
+// KERNEL: Prepare volume data for rendering
+// =============================================================================
+[numthreads(8, 8, 8)]
+void PrepareVolumeData(uint3 id : SV_DispatchThreadID)
+{
+    // Check bounds
+    if (any(id >= uint3(GridDimensions)))
+        return;
+    
+    // Get current element data
+    float4 voxelData = VoxelGrid[id];
+    int elementId = (int) voxelData.r;
+    
+    // Initialize color and density
+    float4 color = float4(0, 0, 0, 0);
+    float density = 0.0;
+    
+    if (elementId > 0)
+    {
+        // Get temperature
+        float temperature = TemperatureGrid[id];
+        
+        // Get element color based on ID and temperature
+        color = GetElementColor(elementId, temperature);
+        
+        // Set density based on element type
+        if (elementId < 100) // Solids
+            density = 1.0;
+        else if (elementId < 200) // Powders
+            density = 0.8;
+        else if (elementId < 300) // Liquids
+            density = 0.7;
+        else if (elementId < 400) // Gases
+            density = max(0.05, min(0.5, temperature / 500.0));
+        else // Special
+            density = 0.6;
+            
+        // Apply LOD-based density adjustments
+        if (CurrentLOD > 0.0)
+        {
+            // Reduce density for distant particles based on LOD
+            density *= max(0.1, 1.0 - (CurrentLOD * 0.5));
+            
+            // Make small elements disappear at distance
+            if (elementId >= 300 && elementId < 400) // Gases
+            {
+                density *= max(0.0, 1.0 - CurrentLOD);
+            }
+        }
+    }
+    
+    // Set color (RGB) and density (A)
+    color.a = density;
+    ColorVolume[id] = color;
+    
+    // Set density for marching cubes / volume rendering
+    DensityVolume[id] = density;
+}
+
+// =============================================================================
+// KERNEL: Generate mesh using marching cubes
+// =============================================================================
+[numthreads(4, 4, 4)]
+void GenerateMarchingCubes(uint3 id : SV_DispatchThreadID)
+{
+    // Skip if out of bounds (leave 1 cell border for sampling neighbors)
+    if (any(id >= uint3(GridDimensions - 1)) || any(id == 0))
+        return;
+    
+    // Get the 8 density values at cube corners
+    float cubeValues[8];
+    cubeValues[0] = DensityVolume[uint3(id.x + 0, id.y + 0, id.z + 0)];
+    cubeValues[1] = DensityVolume[uint3(id.x + 1, id.y + 0, id.z + 0)];
+    cubeValues[2] = DensityVolume[uint3(id.x + 1, id.y + 0, id.z + 1)];
+    cubeValues[3] = DensityVolume[uint3(id.x + 0, id.y + 0, id.z + 1)];
+    cubeValues[4] = DensityVolume[uint3(id.x + 0, id.y + 1, id.z + 0)];
+    cubeValues[5] = DensityVolume[uint3(id.x + 1, id.y + 1, id.z + 0)];
+    cubeValues[6] = DensityVolume[uint3(id.x + 1, id.y + 1, id.z + 1)];
+    cubeValues[7] = DensityVolume[uint3(id.x + 0, id.y + 1, id.z + 1)];
+    
+    // Get cube corners positions
+    float3 cubePos[8];
+    cubePos[0] = float3(id.x + 0, id.y + 0, id.z + 0);
+    cubePos[1] = float3(id.x + 1, id.y + 0, id.z + 0);
+    cubePos[2] = float3(id.x + 1, id.y + 0, id.z + 1);
+    cubePos[3] = float3(id.x + 0, id.y + 0, id.z + 1);
+    cubePos[4] = float3(id.x + 0, id.y + 1, id.z + 0);
+    cubePos[5] = float3(id.x + 1, id.y + 1, id.z + 0);
+    cubePos[6] = float3(id.x + 1, id.y + 1, id.z + 1);
+    cubePos[7] = float3(id.x + 0, id.y + 1, id.z + 1);
+    
+    // Get cube corner colors
+    float4 cubeColors[8];
+    cubeColors[0] = ColorVolume[uint3(id.x + 0, id.y + 0, id.z + 0)];
+    cubeColors[1] = ColorVolume[uint3(id.x + 1, id.y + 0, id.z + 0)];
+    cubeColors[2] = ColorVolume[uint3(id.x + 1, id.y + 0, id.z + 1)];
+    cubeColors[3] = ColorVolume[uint3(id.x + 0, id.y + 0, id.z + 1)];
+    cubeColors[4] = ColorVolume[uint3(id.x + 0, id.y + 1, id.z + 0)];
+    cubeColors[5] = ColorVolume[uint3(id.x + 1, id.y + 1, id.z + 0)];
+    cubeColors[6] = ColorVolume[uint3(id.x + 1, id.y + 1, id.z + 1)];
+    cubeColors[7] = ColorVolume[uint3(id.x + 0, id.y + 1, id.z + 1)];
+    
+    // Calculate cube index
+    int cubeIndex = 0;
+    if (cubeValues[0] >= IsoLevel)
+        cubeIndex |= 1;
+    if (cubeValues[1] >= IsoLevel)
+        cubeIndex |= 2;
+    if (cubeValues[2] >= IsoLevel)
+        cubeIndex |= 4;
+    if (cubeValues[3] >= IsoLevel)
+        cubeIndex |= 8;
+    if (cubeValues[4] >= IsoLevel)
+        cubeIndex |= 16;
+    if (cubeValues[5] >= IsoLevel)
+        cubeIndex |= 32;
+    if (cubeValues[6] >= IsoLevel)
+        cubeIndex |= 64;
+    if (cubeValues[7] >= IsoLevel)
+        cubeIndex |= 128;
+    
+    // Skip empty cubes
+    if (edgeTable[cubeIndex] == 0)
+        return;
+    
+    // Find vertices where the surface intersects the cube edges
+    float3 vertList[12];
+    float4 colorList[12];
+    
+    // For each of the 12 edges check if it's crossed and calculate the vertex
+    if (edgeTable[cubeIndex] & 1)
+    {
+        vertList[0] = VertexInterp(IsoLevel, cubePos[0], cubePos[1], cubeValues[0], cubeValues[1]);
+        colorList[0] = lerp(cubeColors[0], cubeColors[1],
+                           (IsoLevel - cubeValues[0]) / (cubeValues[1] - cubeValues[0]));
+    }
+    if (edgeTable[cubeIndex] & 2)
+    {
+        vertList[1] = VertexInterp(IsoLevel, cubePos[1], cubePos[2], cubeValues[1], cubeValues[2]);
+        colorList[1] = lerp(cubeColors[1], cubeColors[2],
+                           (IsoLevel - cubeValues[1]) / (cubeValues[2] - cubeValues[1]));
+    }
+    if (edgeTable[cubeIndex] & 4)
+    {
+        vertList[2] = VertexInterp(IsoLevel, cubePos[2], cubePos[3], cubeValues[2], cubeValues[3]);
+        colorList[2] = lerp(cubeColors[2], cubeColors[3],
+                           (IsoLevel - cubeValues[2]) / (cubeValues[3] - cubeValues[2]));
+    }
+    if (edgeTable[cubeIndex] & 8)
+    {
+        vertList[3] = VertexInterp(IsoLevel, cubePos[3], cubePos[0], cubeValues[3], cubeValues[0]);
+        colorList[3] = lerp(cubeColors[3], cubeColors[0],
+                           (IsoLevel - cubeValues[3]) / (cubeValues[0] - cubeValues[3]));
+    }
+    if (edgeTable[cubeIndex] & 16)
+    {
+        vertList[4] = VertexInterp(IsoLevel, cubePos[4], cubePos[5], cubeValues[4], cubeValues[5]);
+        colorList[4] = lerp(cubeColors[4], cubeColors[5],
+                           (IsoLevel - cubeValues[4]) / (cubeValues[5] - cubeValues[4]));
+    }
+    if (edgeTable[cubeIndex] & 32)
+    {
+        vertList[5] = VertexInterp(IsoLevel, cubePos[5], cubePos[6], cubeValues[5], cubeValues[6]);
+        colorList[5] = lerp(cubeColors[5], cubeColors[6],
+                           (IsoLevel - cubeValues[5]) / (cubeValues[6] - cubeValues[5]));
+    }
+    if (edgeTable[cubeIndex] & 64)
+    {
+        vertList[6] = VertexInterp(IsoLevel, cubePos[6], cubePos[7], cubeValues[6], cubeValues[7]);
+        colorList[6] = lerp(cubeColors[6], cubeColors[7],
+                           (IsoLevel - cubeValues[6]) / (cubeValues[7] - cubeValues[6]));
+    }
+    if (edgeTable[cubeIndex] & 128)
+    {
+        vertList[7] = VertexInterp(IsoLevel, cubePos[7], cubePos[4], cubeValues[7], cubeValues[4]);
+        colorList[7] = lerp(cubeColors[7], cubeColors[4],
+                           (IsoLevel - cubeValues[7]) / (cubeValues[4] - cubeValues[7]));
+    }
+    if (edgeTable[cubeIndex] & 256)
+    {
+        vertList[8] = VertexInterp(IsoLevel, cubePos[0], cubePos[4], cubeValues[0], cubeValues[4]);
+        colorList[8] = lerp(cubeColors[0], cubeColors[4],
+                           (IsoLevel - cubeValues[0]) / (cubeValues[4] - cubeValues[0]));
+    }
+    if (edgeTable[cubeIndex] & 512)
+    {
+        vertList[9] = VertexInterp(IsoLevel, cubePos[1], cubePos[5], cubeValues[1], cubeValues[5]);
+        colorList[9] = lerp(cubeColors[1], cubeColors[5],
+                           (IsoLevel - cubeValues[1]) / (cubeValues[5] - cubeValues[1]));
+    }
+    if (edgeTable[cubeIndex] & 1024)
+    {
+        vertList[10] = VertexInterp(IsoLevel, cubePos[2], cubePos[6], cubeValues[2], cubeValues[6]);
+        colorList[10] = lerp(cubeColors[2], cubeColors[6],
+                            (IsoLevel - cubeValues[2]) / (cubeValues[6] - cubeValues[2]));
+    }
+    if (edgeTable[cubeIndex] & 2048)
+    {
+        vertList[11] = VertexInterp(IsoLevel, cubePos[3], cubePos[7], cubeValues[3], cubeValues[7]);
+        colorList[11] = lerp(cubeColors[3], cubeColors[7],
+                            (IsoLevel - cubeValues[3]) / (cubeValues[7] - cubeValues[3]));
+    }
+    
+    // Create the triangles
+    for (int i = 0; triTable[cubeIndex][i] != -1; i += 3)
+    {
+        // Get vertex indices from edge indices
+        int idx0 = triTable[cubeIndex][i];
+        int idx1 = triTable[cubeIndex][i + 1];
+        int idx2 = triTable[cubeIndex][i + 2];
+        
+        // Increment the vertex counter atomically
+        int vertexIndex;
+        InterlockedAdd(VertexTriangleCounter[0], 3, vertexIndex);
+        
+        // Make sure we don't exceed buffer sizes
+        if (vertexIndex + 2 >= 1000000)
+            return;
+            
+        // Create triangle vertices
+        // Note: We're using a flat array for vertices for simplicity
+        // A real implementation might use a better data structure
+        
+        // Position, color, normal for vertex 0
+        float3 v0 = vertList[idx0];
+        float3 v1 = vertList[idx1];
+        float3 v2 = vertList[idx2];
+        
+        // Calculate face normal
+        float3 edge1 = v1 - v0;
+        float3 edge2 = v2 - v0;
+        float3 normal = normalize(cross(edge1, edge2));
+        
+        // Store vertices
+        Vertices[vertexIndex] = v0;
+        Vertices[vertexIndex + 1] = v1;
+        Vertices[vertexIndex + 2] = v2;
+        
+        // Store normals
+        // In a full implementation, you'd store normals separately
+        
+        // Store colors - we're simplifying by packing color as a float3, 
+        // but you might want to use a separate color buffer
+        float3 c0 = colorList[idx0].rgb;
+        float3 c1 = colorList[idx1].rgb;
+        float3 c2 = colorList[idx2].rgb;
+        
+        // Add triangle indices
+        int triIndex;
+        InterlockedAdd(VertexTriangleCounter[1], 3, triIndex);
+        
+        // Make sure we don't exceed buffer sizes
+        if (triIndex + 2 >= 2000000)
+            return;
+            
+        Triangles[triIndex] = vertexIndex;
+        Triangles[triIndex + 1] = vertexIndex + 1;
+        Triangles[triIndex + 2] = vertexIndex + 2;
+    }
+}
+
+// =============================================================================
+// KERNEL: Find visible particles for instanced rendering
+// =============================================================================
+[numthreads(8, 8, 8)]
+void FindVisibleParticles(uint3 id : SV_DispatchThreadID)
+{
+    // Check bounds
+    if (any(id >= uint3(GridDimensions)))
+        return;
+    
+    // Get element data
+    float4 voxelData = VoxelGrid[id];
+    int elementId = (int) voxelData.r;
+    
+    // Skip empty cells
+    if (elementId <= 0)
+        return;
+    
+    // Skip cells below density threshold
+    float density = DensityVolume[id];
+    if (density < DensityCutoff)
+        return;
+    
+    // Get color from color volume
+    float4 color = ColorVolume[id];
+    
+    // Skip transparent cells
+    if (color.a < 0.01)
+        return;
+    
+    // Calculate world position
+    float3 position = float3(id) - (GridDimensions / 2.0f);
+    
+    // Check distance to camera for culling
+    float distanceToCamera = length(position - CameraPosition);
+    if (distanceToCamera > MaxRenderDistance)
+        return;
+    
+    // Simple frustum culling
+    float3 dirToPosition = normalize(position - CameraPosition);
+    float dot = dot(dirToPosition, CameraForward);
+    
+    // Skip if outside camera frustum
+    if (dot < cos(radians(CameraFOV * 0.6)))
+        return;
+    
+    // LOD-based culling
+    float lodScale = 1.0;
+    if (CurrentLOD > 0.0)
+    {
+        // Skip some particles based on LOD level
+        float lodSkip = CurrentLOD * 0.5;
+        if ((id.x + id.y + id.z) % max(1, (int) (5 * lodSkip)) != 0)
+            return;
+            
+        // Adjust particle scale based on LOD
+        lodScale = 1.0 + CurrentLOD * 0.5;
+    }
+    
+    // Calculate scale based on element type
+    float scale = ParticleScale * lodScale;
+    
+    // Add instance data atomically
+    uint instanceIndex;
+    InterlockedAdd(DrawArgs[1], 1, instanceIndex);
+    
+    // Make sure we're not exceeding buffer capacity
+    if (instanceIndex >= 1000000)
+        return;
+    
+    // Store instance data
+    InstanceData[instanceIndex].position = position;
+    InstanceData[instanceIndex].scale = scale;
+    InstanceData[instanceIndex].color = color;
+}

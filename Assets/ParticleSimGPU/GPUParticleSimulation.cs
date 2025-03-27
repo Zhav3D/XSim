@@ -52,6 +52,19 @@ public class GPUParticleSimulation : MonoBehaviour
         Cylinder
     }
 
+    [System.Serializable]
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MergedParticleData
+    {
+        public Vector3 position;
+        public Vector3 velocity;
+        public int typeIndex;
+        public float mass;
+        public float radius;
+        public int parentCount;    // Number of original particles combined
+        public int lodLevel;       // Hierarchy level (0 = original)
+    }
+
     #endregion
 
     #region Simulation Parameters
@@ -78,15 +91,13 @@ public class GPUParticleSimulation : MonoBehaviour
     [Header("Performance Optimization")]
     public float cellSize = 2.5f; // Size of each grid cell, should be >= interactionRadius/2
     [Range(1, 8)] public int threadGroupSize = 8; // For 3D spatial grid
-    [Range(0, 3)] public int lodLevels = 2; // Level of detail for physics interactions
-    public bool enableLOD = false;
-    public bool dynamicLOD = true; // Adjust LOD based on frame rate
 
-    [Header("Target Performance")]
-    [Range(30, 144)] public float targetFPS = 60f;
-    [Range(0.1f, 1.0f)] public float lodAdjustSpeed = 0.2f;
-    public float currentLODFactor = 1.0f;
-    private float[] lodDistanceMultipliers = new float[] { 1.0f, 2.0f, 4.0f, 8.0f };
+    [Header("Hierarchical LOD Settings")]
+    public bool enableHierarchicalLOD = true;
+    public float lodDistanceThreshold = 50f;      // Distance at which merging begins
+    public float lodDistanceMultiplier = 2.0f;    // How much to expand cell size per level
+    public int maxLodLevels = 3;                  // Maximum hierarchical depth
+    public float minParticlesForMerging = 5f;     // Min particles needed to create a merged particle
 
     [Header("Bounds Settings")]
     public BoundsShape boundsShape = BoundsShape.Box;
@@ -124,6 +135,10 @@ public class GPUParticleSimulation : MonoBehaviour
     private int resetGridKernel;
     private int validateKernel;
 
+    private int identifyMergeCandidatesKernel;
+    private int createMergedParticlesKernel;
+    private int calculateHierarchicalForcesKernel;
+
     // Compute buffers
     private ComputeBuffer particleBuffer;
     private ComputeBuffer typesBuffer;
@@ -132,6 +147,18 @@ public class GPUParticleSimulation : MonoBehaviour
     private ComputeBuffer gridCountBuffer;
     private ComputeBuffer gridOffsetBuffer;
     private ComputeBuffer argsBuffer;
+
+    // LOD-related buffers
+    private ComputeBuffer mergedParticleBuffer;    // Stores merged particles
+    private ComputeBuffer lodCellBuffer;           // Stores LOD cell assignments
+    private ComputeBuffer lodCellCountBuffer;      // Counts particles per LOD cell
+    private ComputeBuffer lodCellStartBuffer;      // Start indices for particles in LOD cells
+
+    // LOD tracking variables
+    private int maxMergedParticles;
+    public int activeMergedParticles { get; private set; }
+    private int[] lodCellCounts;
+    private int totalLodCells;
 
     // Rendering resources
     private Material instancedMaterial;
@@ -173,7 +200,6 @@ public class GPUParticleSimulation : MonoBehaviour
     {
         // Ensure valid parameters
         cellSize = Mathf.Max(minDistance * 2, cellSize);
-        lodLevels = Mathf.Clamp(lodLevels, 0, 3);
     }
 
     void Update()
@@ -188,12 +214,6 @@ public class GPUParticleSimulation : MonoBehaviour
 
         // Track performance
         MonitorPerformance();
-
-        // Adjust LOD if needed
-        if (enableLOD && dynamicLOD)
-        {
-            AdjustLODForPerformance();
-        }
 
         // Update shader parameters
         UpdateShaderParameters();
@@ -357,6 +377,11 @@ public class GPUParticleSimulation : MonoBehaviour
             Debug.Log($"Rule {i}: TypeA={rule.typeIndexA}, TypeB={rule.typeIndexB}, Value={rule.attractionValue}");
         }
 
+        if (enableHierarchicalLOD)
+        {
+            InitializeHierarchicalLOD();
+        }
+
         initialized = true;
     }
 
@@ -394,7 +419,7 @@ public class GPUParticleSimulation : MonoBehaviour
 
     private void InitializeShaders()
     {
-        // Find all kernels
+        // Find all existing kernels
         initKernel = simulationShader.FindKernel("InitParticles");
         gridAssignmentKernel = simulationShader.FindKernel("AssignParticlesToGrid");
         gridCountingKernel = simulationShader.FindKernel("CountParticlesPerCell");
@@ -403,6 +428,11 @@ public class GPUParticleSimulation : MonoBehaviour
         integrateKernel = simulationShader.FindKernel("IntegrateParticles");
         resetGridKernel = simulationShader.FindKernel("ResetGrid");
         validateKernel = simulationShader.FindKernel("ValidateParticles");
+
+        // Add these lines for the new hierarchical LOD kernels
+        identifyMergeCandidatesKernel = simulationShader.FindKernel("IdentifyMergeCandidates");
+        createMergedParticlesKernel = simulationShader.FindKernel("CreateMergedParticles");
+        calculateHierarchicalForcesKernel = simulationShader.FindKernel("CalculateHierarchicalForces");
     }
 
     private void CreateBuffers()
@@ -744,11 +774,6 @@ public class GPUParticleSimulation : MonoBehaviour
         simulationShader.SetInt("GridSizeZ", gridSizeZ);
         simulationShader.SetInt("TotalGridCells", totalGridCells);
 
-        // LOD parameters
-        simulationShader.SetBool("EnableLOD", enableLOD);
-        simulationShader.SetInt("LODLevels", lodLevels);
-        simulationShader.SetFloat("LODFactor", currentLODFactor);
-
         // Bounds parameters
         simulationShader.SetInt("BoundsShapeType", (int)boundsShape);
         simulationShader.SetFloat("SphereRadius", sphereRadius);
@@ -760,6 +785,12 @@ public class GPUParticleSimulation : MonoBehaviour
         {
             simulationShader.SetMatrix("CameraToWorldMatrix", Camera.main.cameraToWorldMatrix);
             simulationShader.SetVector("CameraPosition", Camera.main.transform.position);
+        }
+
+        // Update LOD parameters if enabled
+        if (enableHierarchicalLOD)
+        {
+            UpdateHierarchicalLODParameters();
         }
 
         // Update active particle count
@@ -782,30 +813,33 @@ public class GPUParticleSimulation : MonoBehaviour
         simulationShader.SetBuffer(gridAssignmentKernel, "GridCounts", gridCountBuffer);
         simulationShader.Dispatch(gridAssignmentKernel, threadGroups, 1, 1);
 
-        // Count particles per cell
-        simulationShader.SetBuffer(gridCountingKernel, "ParticleGrid", gridBuffer);
-        simulationShader.SetBuffer(gridCountingKernel, "GridCounts", gridCountBuffer);
-        simulationShader.Dispatch(gridCountingKernel, threadGroups, 1, 1);
-
         // Calculate grid offsets (prefix sum)
         simulationShader.SetBuffer(gridSortingKernel, "GridCounts", gridCountBuffer);
         simulationShader.SetBuffer(gridSortingKernel, "GridOffsets", gridOffsetBuffer);
         simulationShader.Dispatch(gridSortingKernel, 1, 1, 1);
 
-        // Calculate forces
-        simulationShader.SetBuffer(forceKernel, "Particles", particleBuffer);
-        simulationShader.SetBuffer(forceKernel, "ParticleGrid", gridBuffer);
-        simulationShader.SetBuffer(forceKernel, "GridCounts", gridCountBuffer);
-        simulationShader.SetBuffer(forceKernel, "GridOffsets", gridOffsetBuffer);
-        simulationShader.SetBuffer(forceKernel, "InteractionMatrix", interactionBuffer);
-        simulationShader.SetBuffer(forceKernel, "ParticleTypes", typesBuffer);
-        simulationShader.Dispatch(forceKernel, threadGroups, 1, 1);
+        // Run hierarchical LOD if enabled
+        if (enableHierarchicalLOD)
+        {
+            RunHierarchicalLOD(deltaTime);
+        }
+        else
+        {
+            // Regular force calculation without LOD
+            simulationShader.SetBuffer(forceKernel, "Particles", particleBuffer);
+            simulationShader.SetBuffer(forceKernel, "ParticleGrid", gridBuffer);
+            simulationShader.SetBuffer(forceKernel, "GridCounts", gridCountBuffer);
+            simulationShader.SetBuffer(forceKernel, "GridOffsets", gridOffsetBuffer);
+            simulationShader.SetBuffer(forceKernel, "InteractionMatrix", interactionBuffer);
+            simulationShader.SetBuffer(forceKernel, "ParticleTypes", typesBuffer);
+            simulationShader.Dispatch(forceKernel, threadGroups, 1, 1);
+        }
 
         // Integrate particles
         simulationShader.SetBuffer(integrateKernel, "Particles", particleBuffer);
         simulationShader.Dispatch(integrateKernel, threadGroups, 1, 1);
 
-        // Add this section to validate particles
+        // Validate particles
         simulationShader.SetBuffer(validateKernel, "Particles", particleBuffer);
         simulationShader.SetInt("MaxParticleCount", maxParticleCount);
         simulationShader.SetInt("ParticleCount", particleCount);
@@ -849,6 +883,10 @@ public class GPUParticleSimulation : MonoBehaviour
         if (gridOffsetBuffer != null) { gridOffsetBuffer.Release(); gridOffsetBuffer = null; }
         if (argsBuffer != null) { argsBuffer.Release(); argsBuffer = null; }
         if (colorBuffer != null) { colorBuffer.Release(); colorBuffer = null; }
+        if (mergedParticleBuffer != null) { mergedParticleBuffer.Release(); mergedParticleBuffer = null; }
+        if (lodCellBuffer != null) { lodCellBuffer.Release(); lodCellBuffer = null; }
+        if (lodCellCountBuffer != null) { lodCellCountBuffer.Release(); lodCellCountBuffer = null; }
+        if (lodCellStartBuffer != null) { lodCellStartBuffer.Release(); lodCellStartBuffer = null; }
 
         // Force GC collection to clean up any remaining references
         System.GC.Collect();
@@ -871,6 +909,120 @@ public class GPUParticleSimulation : MonoBehaviour
         }
 
         initialized = false;
+    }
+
+    private void InitializeHierarchicalLOD()
+    {
+        // Calculate LOD grid size (coarser than regular grid)
+        int lodGridX = Mathf.Max(1, gridSizeX / 4);
+        int lodGridY = Mathf.Max(1, gridSizeY / 4);
+        int lodGridZ = Mathf.Max(1, gridSizeZ / 4);
+
+        // Calculate total LOD cells across all levels
+        totalLodCells = 0;
+        for (int level = 1; level <= maxLodLevels; level++)
+        {
+            totalLodCells += lodGridX * lodGridY * lodGridZ;
+        }
+
+        // Create buffers
+        maxMergedParticles = Mathf.Max(1, particleCount / 10); // Conservative estimate
+        mergedParticleBuffer = new ComputeBuffer(maxMergedParticles, Marshal.SizeOf(typeof(MergedParticleData)));
+        lodCellBuffer = new ComputeBuffer(maxParticleCount, Marshal.SizeOf(typeof(int)) * 4); // cellIndex, particleIndex, typeIndex, lodLevel
+        lodCellCountBuffer = new ComputeBuffer(totalLodCells, sizeof(int));
+        lodCellStartBuffer = new ComputeBuffer(totalLodCells, sizeof(int));
+
+        // Initialize merged particles array with defaults
+        MergedParticleData[] mergedData = new MergedParticleData[maxMergedParticles];
+        for (int i = 0; i < maxMergedParticles; i++)
+        {
+            mergedData[i] = new MergedParticleData
+            {
+                position = Vector3.zero,
+                velocity = Vector3.zero,
+                typeIndex = -1,
+                mass = 0,
+                radius = 0,
+                parentCount = 0,
+                lodLevel = 0
+            };
+        }
+        mergedParticleBuffer.SetData(mergedData);
+
+        // Set shader parameters
+        simulationShader.SetInt("TotalLODCells", totalLodCells);
+        simulationShader.SetInt("MaxMergedParticles", maxMergedParticles);
+        simulationShader.SetVector("LODGridSize", new Vector3(lodGridX, lodGridY, lodGridZ));
+        simulationShader.SetFloat("LODCellSize", cellSize * 4); // Base LOD cell size
+    }
+
+    private void UpdateHierarchicalLODParameters()
+    {
+        simulationShader.SetBool("EnableHierarchicalLOD", enableHierarchicalLOD);
+        simulationShader.SetFloat("LODDistanceThreshold", lodDistanceThreshold);
+        simulationShader.SetFloat("LODDistanceMultiplier", lodDistanceMultiplier);
+        simulationShader.SetInt("MaxLODLevels", maxLodLevels);
+
+        // Pass camera info for LOD
+        if (Camera.main != null)
+        {
+            simulationShader.SetMatrix("CameraToWorldMatrix", Camera.main.cameraToWorldMatrix);
+            simulationShader.SetVector("CameraPosition", Camera.main.transform.position);
+        }
+    }
+
+    private void RunHierarchicalLOD(float deltaTime)
+    {
+        // Check that all required buffers are initialized
+        if (lodCellCountBuffer == null || lodCellBuffer == null ||
+            mergedParticleBuffer == null || lodCellStartBuffer == null)
+        {
+            Debug.LogWarning("LOD buffers not initialized, initializing now...");
+            InitializeHierarchicalLOD();
+            UpdateHierarchicalLODParameters();
+        }
+
+        int threadGroups = Mathf.CeilToInt(activeParticleCount / 64.0f);
+        int lodCellThreadGroups = Mathf.CeilToInt(totalLodCells / 64.0f);
+
+        // Reset LOD cell counts
+        simulationShader.SetBuffer(resetGridKernel, "LODCellCounts", lodCellCountBuffer);
+        simulationShader.Dispatch(resetGridKernel, lodCellThreadGroups, 1, 1);
+
+        // Reset merged particle counter (we use first element's parentCount field as counter)
+        MergedParticleData[] resetData = new MergedParticleData[1];
+        resetData[0].parentCount = 0;
+        mergedParticleBuffer.SetData(resetData, 0, 0, 1);
+
+        // Identify merge candidates
+        simulationShader.SetBuffer(identifyMergeCandidatesKernel, "Particles", particleBuffer);
+        simulationShader.SetBuffer(identifyMergeCandidatesKernel, "LODCellAssignments", lodCellBuffer);
+        simulationShader.SetBuffer(identifyMergeCandidatesKernel, "LODCellCounts", lodCellCountBuffer);
+        simulationShader.Dispatch(identifyMergeCandidatesKernel, threadGroups, 1, 1);
+
+        // Calculate LOD cell start indices (prefix sum)
+        simulationShader.SetBuffer(gridSortingKernel, "LODCellCounts", lodCellCountBuffer);
+        simulationShader.SetBuffer(gridSortingKernel, "LODCellStartIndices", lodCellStartBuffer);
+        simulationShader.Dispatch(gridSortingKernel, 1, 1, 1);
+
+        // Create merged particles
+        simulationShader.SetBuffer(createMergedParticlesKernel, "Particles", particleBuffer);
+        simulationShader.SetBuffer(createMergedParticlesKernel, "LODCellAssignments", lodCellBuffer);
+        simulationShader.SetBuffer(createMergedParticlesKernel, "LODCellCounts", lodCellCountBuffer);
+        simulationShader.SetBuffer(createMergedParticlesKernel, "LODCellStartIndices", lodCellStartBuffer);
+        simulationShader.SetBuffer(createMergedParticlesKernel, "MergedParticles", mergedParticleBuffer);
+        simulationShader.Dispatch(createMergedParticlesKernel, lodCellThreadGroups, 1, 1);
+
+        // Get number of active merged particles
+        MergedParticleData[] countData = new MergedParticleData[1];
+        mergedParticleBuffer.GetData(countData, 0, 0, 1);
+        activeMergedParticles = countData[0].parentCount;
+
+        // Calculate hierarchical forces
+        simulationShader.SetBuffer(calculateHierarchicalForcesKernel, "Particles", particleBuffer);
+        simulationShader.SetBuffer(calculateHierarchicalForcesKernel, "MergedParticles", mergedParticleBuffer);
+        simulationShader.SetBuffer(calculateHierarchicalForcesKernel, "InteractionMatrix", interactionBuffer);
+        simulationShader.Dispatch(calculateHierarchicalForcesKernel, threadGroups, 1, 1);
     }
 
     #endregion
@@ -898,39 +1050,7 @@ public class GPUParticleSimulation : MonoBehaviour
             float avgFps = frameCount / accumulatedTime;
             accumulatedTime = 0;
             frameCount = 0;
-
-            // Use this for LOD adjustment
-            OnFPSUpdated(avgFps);
         }
-    }
-
-    private void OnFPSUpdated(float fps)
-    {
-        if (!enableLOD || !dynamicLOD) return;
-
-        // Adjust LOD to maintain target framerate
-        float fpsRatio = fps / targetFPS;
-
-        if (fpsRatio < 0.9f) // Under target
-        {
-            // Reduce quality
-            currentLODFactor = Mathf.Lerp(currentLODFactor,
-                Mathf.Min(currentLODFactor * 1.5f, 8.0f),
-                lodAdjustSpeed);
-        }
-        else if (fpsRatio > 1.1f && currentLODFactor > 1.1f) // Above target with room to improve
-        {
-            // Increase quality
-            currentLODFactor = Mathf.Lerp(currentLODFactor,
-                Mathf.Max(currentLODFactor * 0.8f, 1.0f),
-                lodAdjustSpeed);
-        }
-    }
-
-    private void AdjustLODForPerformance()
-    {
-        // Validate LOD factor stays within bounds
-        currentLODFactor = Mathf.Clamp(currentLODFactor, 1.0f, 8.0f);
     }
 
     #endregion

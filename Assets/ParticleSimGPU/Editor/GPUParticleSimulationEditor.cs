@@ -208,35 +208,32 @@ public class GPUParticleSimulationEditor : Editor
 
     private void DrawLODSection(GPUParticleSimulation simulation)
     {
-        showLODSettings = EditorGUILayout.Foldout(showLODSettings, "Level of Detail (LOD) Settings", true);
+        showLODSettings = EditorGUILayout.Foldout(showLODSettings, "Hierarchical LOD Settings", true);
         if (showLODSettings)
         {
             EditorGUI.indentLevel++;
 
             EditorGUILayout.BeginHorizontal();
-            simulation.enableLOD = EditorGUILayout.Toggle("Enable LOD", simulation.enableLOD);
+            simulation.enableHierarchicalLOD = EditorGUILayout.Toggle("Enable Hierarchical LOD", simulation.enableHierarchicalLOD);
             if (GUILayout.Button("?", GUILayout.Width(25)))
             {
-                EditorUtility.DisplayDialog("Level of Detail",
-                    "LOD dynamically reduces simulation quality for distant particles to maintain performance.\n\n" +
-                    "ON: Better performance with millions of particles\n" +
-                    "OFF: Consistent quality everywhere but potential performance impact\n\n" +
-                    "Use this feature when scaling to very large particle counts.", "OK");
+                EditorUtility.DisplayDialog("Hierarchical LOD",
+                    "Type-constrained hierarchical merging preserves physical properties and asymmetric interactions.\n\n" +
+                    "Distant particles of the same type are merged into representative particles with the total mass and momentum preserved.\n\n" +
+                    "This maintains simulation accuracy while significantly improving performance.", "OK");
             }
             EditorGUILayout.EndHorizontal();
 
-            if (simulation.enableLOD)
+            if (simulation.enableHierarchicalLOD)
             {
-                simulation.lodLevels = EditorGUILayout.IntSlider("LOD Levels", simulation.lodLevels, 0, 3);
+                simulation.lodDistanceThreshold = EditorGUILayout.Slider("Distance Threshold", simulation.lodDistanceThreshold, 10f, 200f);
+                simulation.lodDistanceMultiplier = EditorGUILayout.Slider("Cell Size Multiplier", simulation.lodDistanceMultiplier, 1.5f, 4f);
+                simulation.maxLodLevels = EditorGUILayout.IntSlider("Max LOD Levels", simulation.maxLodLevels, 1, 5);
+                simulation.minParticlesForMerging = EditorGUILayout.Slider("Min Particles For Merging", simulation.minParticlesForMerging, 2f, 20f);
 
-                simulation.dynamicLOD = EditorGUILayout.Toggle("Dynamic LOD", simulation.dynamicLOD);
-
-                if (simulation.dynamicLOD)
+                if (Application.isPlaying)
                 {
-                    EditorGUI.indentLevel++;
-                    simulation.targetFPS = EditorGUILayout.Slider("Target FPS", simulation.targetFPS, 30f, 144f);
-                    simulation.lodAdjustSpeed = EditorGUILayout.Slider("Adjust Speed", simulation.lodAdjustSpeed, 0.1f, 1.0f);
-                    EditorGUI.indentLevel--;
+                    EditorGUILayout.LabelField("Active Merged Particles", simulation.activeMergedParticles.ToString());
                 }
             }
 
@@ -284,11 +281,6 @@ public class GPUParticleSimulationEditor : Editor
             EditorGUILayout.LabelField("Average Frame Time", $"{avgFrameTime * 1000f:F2} ms ({1f / Mathf.Max(0.001f, avgFrameTime):F1} FPS)");
             EditorGUILayout.LabelField("Min/Max Frame Time", $"{minFrameTime * 1000f:F2} ms / {maxFrameTime * 1000f:F2} ms");
 
-            if (simulation.enableLOD && simulation.dynamicLOD)
-            {
-                EditorGUILayout.LabelField("Current LOD Factor", simulation.currentLODFactor.ToString("F2"));
-            }
-
             // Performance warnings
             if (1f / Mathf.Max(0.001f, avgFrameTime) < 30f)
             {
@@ -303,7 +295,6 @@ public class GPUParticleSimulationEditor : Editor
                 Debug.Log($"Active Particles: {simulation.activeParticleCount:N0}");
                 Debug.Log($"Grid Size: {simulation.gridCellCount:N0} cells");
                 Debug.Log($"Frame Time: {simulation.frameTimeMs:F2} ms");
-                Debug.Log($"LOD Factor: {simulation.currentLODFactor:F2}");
                 Debug.Log($"Interaction Radius: {simulation.interactionRadius:F2}");
                 Debug.Log($"Cell Size: {simulation.cellSize:F2}");
             }

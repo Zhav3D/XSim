@@ -185,12 +185,11 @@ MonoBehaviour:
   interactionRadius: 100
   cellSize: 3.75
   threadGroupSize: 8
-  lodLevels: 2
-  enableLOD: 0
-  dynamicLOD: 1
-  targetFPS: 60
-  lodAdjustSpeed: 0.2
-  currentLODFactor: 1
+  enableHierarchicalLOD: 0
+  lodDistanceThreshold: 50
+  lodDistanceMultiplier: 2
+  maxLodLevels: 3
+  minParticlesForMerging: 5
   boundsShape: 0
   sphereRadius: 10
   cylinderRadius: 10

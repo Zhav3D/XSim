@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System;
+using UnityEditor;
 
 /// <summary>
 /// Runtime OnGUI editor for GPU Particle System.
@@ -20,6 +21,14 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
     // Tracked components
     private GPUParticleSimulation simulation;
     private GPUInteractionMatrixGenerator matrixGenerator;
+
+    // Dialog state
+    private bool showConfirmDialog = false;
+    private string dialogTitle = "";
+    private string dialogMessage = "";
+    private System.Action onConfirmAction;
+    private Rect dialogRect = new Rect(0, 0, 300, 150);
+    private bool dialogInitialized = false;
 
     // Foldout states
     private bool showSimulationSettings = true;
@@ -74,7 +83,7 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
     private Color deleteButtonColor = new Color(0.7f, 0.2f, 0.2f);
 
     // Constants
-    private const float MATRIX_CELL_SIZE = 40f;
+    private const float MATRIX_CELL_SIZE = 50f;
     private const int WINDOW_ID = 9876;
 
     // Runtime parameter changes
@@ -234,16 +243,94 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
 
     void OnGUI()
     {
-        if (!showEditor) return;
+        if (!showEditor && !showConfirmDialog) return;
 
         InitializeStyles(); // Ensure styles are initialized even after domain reload
 
-        // Draw the main editor window
-        editorWindowRect = GUILayout.Window(WINDOW_ID, editorWindowRect, DrawEditorWindow, "GPU Particle System Editor", GUI.skin.window);
+        // First draw the confirm dialog if it's active
+        if (showConfirmDialog)
+        {
+            // Initialize dialog position if needed
+            if (!dialogInitialized)
+            {
+                dialogRect.x = (Screen.width - dialogRect.width) / 2;
+                dialogRect.y = (Screen.height - dialogRect.height) / 2;
+                dialogInitialized = true;
+            }
 
-        // Make sure window stays within screen bounds
-        editorWindowRect.x = Mathf.Clamp(editorWindowRect.x, 0, Screen.width - editorWindowRect.width);
-        editorWindowRect.y = Mathf.Clamp(editorWindowRect.y, 0, Screen.height - editorWindowRect.height);
+            // Use a darker overlay behind the dialog
+            GUI.Box(new Rect(0, 0, Screen.width, Screen.height), "", new GUIStyle(GUI.skin.box)
+            {
+                normal = { background = MakeTexture(2, 2, new Color(0, 0, 0, 0.5f)) }
+            });
+
+            // Draw the dialog
+            dialogRect = GUILayout.Window(9999, dialogRect, (id) =>
+            {
+                GUILayout.BeginVertical();
+
+                GUILayout.Space(10);
+                GUILayout.Label(dialogTitle, subHeaderStyle);
+                GUILayout.Space(10);
+
+                GUILayout.Label(dialogMessage);
+
+                GUILayout.Space(20);
+
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("Yes", GUILayout.Height(30)))
+                {
+                    onConfirmAction?.Invoke();
+                    CloseConfirmDialog();
+                }
+
+                if (GUILayout.Button("No", GUILayout.Height(30)))
+                {
+                    CloseConfirmDialog();
+                }
+                GUILayout.EndHorizontal();
+
+                GUILayout.EndVertical();
+
+                // Make the window draggable
+                GUI.DragWindow(new Rect(0, 0, 10000, 20));
+            }, "Confirm");
+
+            // Handle escape key to close dialog
+            if (Event.current.type == EventType.KeyDown && Event.current.keyCode == KeyCode.Escape)
+            {
+                CloseConfirmDialog();
+                Event.current.Use();
+            }
+        }
+
+        // Then draw the main editor window if editor is visible
+        if (showEditor)
+        {
+            editorWindowRect = GUILayout.Window(WINDOW_ID, editorWindowRect, DrawEditorWindow, "GPU Particle System Editor", GUI.skin.window);
+
+            // Make sure window stays within screen bounds
+            editorWindowRect.x = Mathf.Clamp(editorWindowRect.x, 0, Screen.width - editorWindowRect.width);
+            editorWindowRect.y = Mathf.Clamp(editorWindowRect.y, 0, Screen.height - editorWindowRect.height);
+        }
+    }
+
+    // Helper method to close the dialog
+    private void CloseConfirmDialog()
+    {
+        showConfirmDialog = false;
+        dialogInitialized = false;
+        onConfirmAction = null;
+    }
+
+    // New method to show confirm dialog
+    private void ShowConfirmDialog(string title, string message, System.Action onConfirm)
+    {
+        dialogTitle = title;
+        dialogMessage = message;
+        onConfirmAction = onConfirm;
+        showConfirmDialog = true;
+        dialogInitialized = false;
     }
 
     void DrawEditorWindow(int windowID)
@@ -396,15 +483,15 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
                 GUI.backgroundColor = deleteButtonColor;
                 if (GUILayout.Button("Delete", GUILayout.Width(60)))
                 {
-                    if (EditorConfirmDialog("Delete Preset", $"Are you sure you want to delete preset '{preset.name}'?"))
-                    {
-                        DeletePreset(i);
-                        if (selectedPresetIndex == i)
-                        {
-                            selectedPresetIndex = -1;
-                        }
-                        break; // Exit loop after modifying the collection
-                    }
+                    ShowConfirmDialog("Delete Preset", $"Are you sure you want to delete preset '{preset.name}'?", 
+                        () => {
+                            DeletePreset(i);
+                            if (selectedPresetIndex == i)
+                            {
+                                selectedPresetIndex = -1;
+                            }
+                        });
+                    break;
                 }
                 GUI.backgroundColor = Color.white;
 
@@ -420,10 +507,11 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
             {
                 if (GUILayout.Button("Load Selected Preset", buttonStyle))
                 {
-                    if (EditorConfirmDialog("Load Preset", "This will replace your current settings. Continue?"))
-                    {
-                        LoadPreset(selectedPresetIndex);
-                    }
+                    ShowConfirmDialog("Load Preset", "This will replace your current settings. Continue?",
+                        () =>
+                        {
+                            LoadPreset(selectedPresetIndex);
+                        });
                 }
             }
             else
@@ -455,21 +543,25 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
         GUILayout.BeginHorizontal();
         GUILayout.Label("Simulation Speed:", GUILayout.Width(150));
         simulation.simulationSpeed = GUILayout.HorizontalSlider(simulation.simulationSpeed, 0f, 5f, GUILayout.Width(200));
-        GUILayout.Label(simulation.simulationSpeed.ToString("F2"), GUILayout.Width(50));
+        GUILayout.Label(simulation.simulationSpeed.ToString("F5"), GUILayout.Width(50));
+        bool didParseSimulationSpeed = float.TryParse(GUILayout.TextField(simulation.simulationSpeed.ToString(), GUILayout.Width(200)), out float parsedSimulationSpeed);
+        simulation.simulationSpeed = didParseSimulationSpeed ? parsedSimulationSpeed : simulation.simulationSpeed;
         GUILayout.EndHorizontal();
 
         // Elasticity
         GUILayout.BeginHorizontal();
         GUILayout.Label("Collision Elasticity:", GUILayout.Width(150));
         simulation.collisionElasticity = GUILayout.HorizontalSlider(simulation.collisionElasticity, 0f, 1f, GUILayout.Width(200));
-        GUILayout.Label(simulation.collisionElasticity.ToString("F2"), GUILayout.Width(50));
+        GUILayout.Label(simulation.collisionElasticity.ToString("F5"), GUILayout.Width(50));
         GUILayout.EndHorizontal();
 
         // Dampening
         GUILayout.BeginHorizontal();
         GUILayout.Label("Dampening:", GUILayout.Width(150));
         simulation.dampening = GUILayout.HorizontalSlider(simulation.dampening, 0.5f, 1f, GUILayout.Width(200));
-        GUILayout.Label(simulation.dampening.ToString("F2"), GUILayout.Width(50));
+        GUILayout.Label(simulation.dampening.ToString("F5"), GUILayout.Width(50));
+        bool didParseDampening = float.TryParse(GUILayout.TextField(simulation.dampening.ToString(), GUILayout.Width(200)), out float parsedDampening);
+        simulation.dampening = didParseDampening ? parsedDampening : simulation.dampening;
         GUILayout.EndHorizontal();
 
         // Interaction Strength with +/- buttons
@@ -537,7 +629,7 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
         GUILayout.BeginHorizontal();
         GUILayout.Label("Bounds X:", GUILayout.Width(150));
         float newBoundsX = float.Parse(GUILayout.TextField(simulation.simulationBounds.x.ToString("F1"), GUILayout.Width(60)));
-        float boundsDiffX = GUILayout.HorizontalSlider(simulation.simulationBounds.x, 1f, 100f, GUILayout.Width(140));
+        float boundsDiffX = GUILayout.HorizontalSlider(simulation.simulationBounds.x, 1f, 500f, GUILayout.Width(140));
         if (Mathf.Abs(boundsDiffX - simulation.simulationBounds.x) > 0.01f)
         {
             Vector3 newBounds = simulation.simulationBounds;
@@ -564,7 +656,7 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
         GUILayout.BeginHorizontal();
         GUILayout.Label("Bounds Y:", GUILayout.Width(150));
         float newBoundsY = float.Parse(GUILayout.TextField(simulation.simulationBounds.y.ToString("F1"), GUILayout.Width(60)));
-        float boundsDiffY = GUILayout.HorizontalSlider(simulation.simulationBounds.y, 1f, 100f, GUILayout.Width(140));
+        float boundsDiffY = GUILayout.HorizontalSlider(simulation.simulationBounds.y, 1f, 500f, GUILayout.Width(140));
         if (Mathf.Abs(boundsDiffY - simulation.simulationBounds.y) > 0.01f)
         {
             Vector3 newBounds = simulation.simulationBounds;
@@ -591,7 +683,7 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
         GUILayout.BeginHorizontal();
         GUILayout.Label("Bounds Z:", GUILayout.Width(150));
         float newBoundsZ = float.Parse(GUILayout.TextField(simulation.simulationBounds.z.ToString("F1"), GUILayout.Width(60)));
-        float boundsDiffZ = GUILayout.HorizontalSlider(simulation.simulationBounds.z, 1f, 100f, GUILayout.Width(140));
+        float boundsDiffZ = GUILayout.HorizontalSlider(simulation.simulationBounds.z, 1f, 500f, GUILayout.Width(140));
         if (Mathf.Abs(boundsDiffZ - simulation.simulationBounds.z) > 0.01f)
         {
             Vector3 newBounds = simulation.simulationBounds;
@@ -682,7 +774,7 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
                 GUILayout.BeginHorizontal();
                 GUILayout.Label("Cylinder Radius:", GUILayout.Width(150));
                 float newCylinderRadius = float.Parse(GUILayout.TextField(simulation.cylinderRadius.ToString("F1"), GUILayout.Width(60)));
-                float cylinderRadiusDiff = GUILayout.HorizontalSlider(simulation.cylinderRadius, 1f, 50f, GUILayout.Width(140));
+                float cylinderRadiusDiff = GUILayout.HorizontalSlider(simulation.cylinderRadius, 1f, 300f, GUILayout.Width(140));
 
                 if (Mathf.Abs(cylinderRadiusDiff - simulation.cylinderRadius) > 0.01f)
                 {
@@ -706,7 +798,7 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
                 GUILayout.BeginHorizontal();
                 GUILayout.Label("Cylinder Height:", GUILayout.Width(150));
                 float newCylinderHeight = float.Parse(GUILayout.TextField(simulation.cylinderHeight.ToString("F1"), GUILayout.Width(60)));
-                float cylinderHeightDiff = GUILayout.HorizontalSlider(simulation.cylinderHeight, 1f, 100f, GUILayout.Width(140));
+                float cylinderHeightDiff = GUILayout.HorizontalSlider(simulation.cylinderHeight, 1f, 300f, GUILayout.Width(140));
 
                 if (Mathf.Abs(cylinderHeightDiff - simulation.cylinderHeight) > 0.01f)
                 {
@@ -737,21 +829,28 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
         if (GUILayout.Button("Small Box", GUILayout.Width(80)))
         {
             simulation.boundsShape = GPUParticleSimulation.BoundsShape.Box;
-            simulation.simulationBounds = new Vector3(5f, 5f, 5f);
+            simulation.simulationBounds = new Vector3(15f, 15f, 15f);
             if (Application.isPlaying) simulation.RequestReset();
         }
 
         if (GUILayout.Button("Medium Box", GUILayout.Width(100)))
         {
             simulation.boundsShape = GPUParticleSimulation.BoundsShape.Box;
-            simulation.simulationBounds = new Vector3(10f, 10f, 10f);
+            simulation.simulationBounds = new Vector3(50f, 50f, 50f);
             if (Application.isPlaying) simulation.RequestReset();
         }
 
         if (GUILayout.Button("Large Box", GUILayout.Width(80)))
         {
             simulation.boundsShape = GPUParticleSimulation.BoundsShape.Box;
-            simulation.simulationBounds = new Vector3(20f, 20f, 20f);
+            simulation.simulationBounds = new Vector3(100f, 100f, 100f);
+            if (Application.isPlaying) simulation.RequestReset();
+        }
+
+        if (GUILayout.Button("Gigantic Box", GUILayout.Width(80)))
+        {
+            simulation.boundsShape = GPUParticleSimulation.BoundsShape.Box;
+            simulation.simulationBounds = new Vector3(300f, 300f, 300f);
             if (Application.isPlaying) simulation.RequestReset();
         }
 
@@ -805,7 +904,7 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
         if (GUILayout.Button("Tall Column", GUILayout.Width(100)))
         {
             simulation.boundsShape = GPUParticleSimulation.BoundsShape.Cylinder;
-            simulation.cylinderRadius = 5f;
+            simulation.cylinderRadius = 15f;
             simulation.cylinderHeight = 30f;
             if (Application.isPlaying) simulation.RequestReset();
         }
@@ -916,32 +1015,29 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
 
                 // Color field (show color as background)
                 GUI.backgroundColor = type.color;
-                if (GUILayout.Button("", GUILayout.Width(30), GUILayout.Height(18)))
+                if (GUILayout.Button("", GUILayout.Width(70), GUILayout.Height(18)))
                 {
                     // We can't show a color picker in OnGUI, so we'll just cycle through some preset colors
                     type.color = CycleColor(type.color);
                 }
                 GUI.backgroundColor = Color.white;
 
-                // Basic color controls (RGB)
-                GUILayout.Label("", GUILayout.Width(5));
-
                 // Mass field
-                float newMass = float.Parse(GUILayout.TextField(type.mass.ToString("F1"), GUILayout.Width(40)));
+                float newMass = float.Parse(GUILayout.TextField(type.mass.ToString("F1"), GUILayout.Width(70)));
                 if (Mathf.Abs(newMass - type.mass) > 0.01f)
                 {
                     type.mass = Mathf.Max(0.1f, newMass);
                 }
 
                 // Radius field
-                float newRadius = float.Parse(GUILayout.TextField(type.radius.ToString("F1"), GUILayout.Width(40)));
+                float newRadius = float.Parse(GUILayout.TextField(type.radius.ToString("F1"), GUILayout.Width(70)));
                 if (Mathf.Abs(newRadius - type.radius) > 0.01f)
                 {
                     type.radius = Mathf.Max(0.1f, newRadius);
                 }
 
                 // Spawn amount field
-                float newSpawnAmount = float.Parse(GUILayout.TextField(type.spawnAmount.ToString("F0"), GUILayout.Width(40)));
+                float newSpawnAmount = float.Parse(GUILayout.TextField(type.spawnAmount.ToString("F0"), GUILayout.Width(70)));
                 if (Mathf.Abs(newSpawnAmount - type.spawnAmount) > 0.1f)
                 {
                     type.spawnAmount = Mathf.Max(1f, newSpawnAmount);
@@ -1141,15 +1237,6 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
         GUILayout.Label(simulation.threadGroupSize.ToString(), GUILayout.Width(50));
         GUILayout.EndHorizontal();
 
-        // Enable LOD
-        GUILayout.BeginHorizontal();
-        bool newEnableLOD = GUILayout.Toggle(simulation.enableLOD, "Enable Level of Detail (LOD)");
-        if (newEnableLOD != simulation.enableLOD)
-        {
-            simulation.enableLOD = newEnableLOD;
-        }
-        GUILayout.EndHorizontal();
-
         GUILayout.Space(5);
 
         // Debug visualization toggles
@@ -1168,45 +1255,55 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
         GUILayout.Label("Level of Detail Settings", subHeaderStyle);
         GUILayout.Space(5);
 
-        GUI.enabled = simulation.enableLOD;
+        // Toggle between old and new LOD systems
+        simulation.enableHierarchicalLOD = GUILayout.Toggle(
+            simulation.enableHierarchicalLOD,
+            "Use Hierarchical LOD (Type-Constrained Merging)"
+        );
 
-        // LOD Levels
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("LOD Levels:", GUILayout.Width(150));
-        simulation.lodLevels = Mathf.RoundToInt(GUILayout.HorizontalSlider(simulation.lodLevels, 0, 3, GUILayout.Width(200)));
-        GUILayout.Label(simulation.lodLevels.ToString(), GUILayout.Width(50));
-        GUILayout.EndHorizontal();
-
-        // Dynamic LOD
-        GUILayout.BeginHorizontal();
-        simulation.dynamicLOD = GUILayout.Toggle(simulation.dynamicLOD, "Dynamic LOD (adjust based on performance)");
-        GUILayout.EndHorizontal();
-
-        if (simulation.dynamicLOD)
+        if (simulation.enableHierarchicalLOD)
         {
-            // Target FPS
+            // Hierarchical LOD settings
+            GUI.enabled = true;
+
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Target FPS:", GUILayout.Width(150));
-            simulation.targetFPS = GUILayout.HorizontalSlider(simulation.targetFPS, 30f, 144f, GUILayout.Width(200));
-            GUILayout.Label(simulation.targetFPS.ToString("F0"), GUILayout.Width(50));
+            GUILayout.Label("Distance Threshold:", GUILayout.Width(150));
+            simulation.lodDistanceThreshold = GUILayout.HorizontalSlider(
+                simulation.lodDistanceThreshold, 10f, 200f, GUILayout.Width(200));
+            GUILayout.Label(simulation.lodDistanceThreshold.ToString("F1"), GUILayout.Width(50));
             GUILayout.EndHorizontal();
 
-            // LOD Adjust Speed
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Adjust Speed:", GUILayout.Width(150));
-            simulation.lodAdjustSpeed = GUILayout.HorizontalSlider(simulation.lodAdjustSpeed, 0.1f, 1f, GUILayout.Width(200));
-            GUILayout.Label(simulation.lodAdjustSpeed.ToString("F2"), GUILayout.Width(50));
+            GUILayout.Label("Cell Size Multiplier:", GUILayout.Width(150));
+            simulation.lodDistanceMultiplier = GUILayout.HorizontalSlider(
+                simulation.lodDistanceMultiplier, 1.5f, 4f, GUILayout.Width(200));
+            GUILayout.Label(simulation.lodDistanceMultiplier.ToString("F1"), GUILayout.Width(50));
             GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Max LOD Levels:", GUILayout.Width(150));
+            simulation.maxLodLevels = Mathf.RoundToInt(GUILayout.HorizontalSlider(
+                simulation.maxLodLevels, 1, 5, GUILayout.Width(200)));
+            GUILayout.Label(simulation.maxLodLevels.ToString(), GUILayout.Width(50));
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Min Particles For Merging:", GUILayout.Width(150));
+            simulation.minParticlesForMerging = GUILayout.HorizontalSlider(
+                simulation.minParticlesForMerging, 2f, 20f, GUILayout.Width(200));
+            GUILayout.Label(simulation.minParticlesForMerging.ToString("F0"), GUILayout.Width(50));
+            GUILayout.EndHorizontal();
+
+            if (Application.isPlaying)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Active Merged Particles:", GUILayout.Width(150));
+                GUILayout.Label(simulation.activeMergedParticles.ToString(), GUILayout.Width(50));
+                GUILayout.EndHorizontal();
+            }
         }
 
-        // Current LOD Factor display
-        GUILayout.BeginHorizontal();
-        GUILayout.Label("Current LOD Factor:", GUILayout.Width(150));
-        GUILayout.Label(simulation.currentLODFactor.ToString("F2"), GUILayout.Width(50));
-        GUILayout.EndHorizontal();
-
         GUI.enabled = true;
-
         GUILayout.EndVertical();
     }
 
@@ -1286,7 +1383,7 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
             // Spawn Multiplier
             GUILayout.BeginHorizontal();
             GUILayout.Label("Spawn Multiplier:", GUILayout.Width(150));
-            matrixGenerator.particleSpawnMultiplier = GUILayout.HorizontalSlider(matrixGenerator.particleSpawnMultiplier, 0.1f, 500f, GUILayout.Width(200));
+            matrixGenerator.particleSpawnMultiplier = GUILayout.HorizontalSlider(matrixGenerator.particleSpawnMultiplier, 0.1f, 1000f, GUILayout.Width(200));
             GUILayout.Label(matrixGenerator.particleSpawnMultiplier.ToString("F2"), GUILayout.Width(50));
             GUILayout.EndHorizontal();
 
@@ -1657,7 +1754,12 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
         GUI.backgroundColor = cellColor;
 
         // Display the value with a slider instead of a text field
-        float newValue = GUILayout.HorizontalSlider(value, -1f, 1f, GUILayout.Width(MATRIX_CELL_SIZE));
+        GUILayout.BeginVertical(GUILayout.Width(MATRIX_CELL_SIZE));
+        GUILayout.Space(12);
+        bool didParseValue = float.TryParse(GUILayout.TextField(value.ToString(), GUILayout.Width(MATRIX_CELL_SIZE)), out float parsedValue);
+        float newValue = didParseValue ? parsedValue : value;
+        newValue = GUILayout.HorizontalSlider(newValue, -1f, 1f, GUILayout.Width(MATRIX_CELL_SIZE));
+        GUILayout.EndVertical();
 
         if (Mathf.Abs(newValue - value) > 0.01f)
         {
@@ -1895,42 +1997,49 @@ public class GPUParticleRuntimeEditor : MonoBehaviour
             return;
         }
 
-        SimulationPreset preset = savedPresets[presetIndex];
-
-        // Apply simulation settings
-        simulation.simulationSpeed = preset.simulationSpeed;
-        simulation.collisionElasticity = preset.collisionElasticity;
-        simulation.simulationBounds = preset.simulationBounds;
-        simulation.dampening = preset.dampening;
-        simulation.interactionStrength = preset.interactionStrength;
-        simulation.minDistance = preset.minDistance;
-        simulation.bounceForce = preset.bounceForce;
-        simulation.maxForce = preset.maxForce;
-        simulation.maxVelocity = preset.maxVelocity;
-        simulation.interactionRadius = preset.interactionRadius;
-        simulation.cellSize = preset.cellSize;
-
-        // Apply particle types
-        simulation.particleTypes.Clear();
-        foreach (var serializedType in preset.particleTypes)
+        try
         {
-            simulation.particleTypes.Add(serializedType.ToParticleType());
-        }
+            SimulationPreset preset = savedPresets[presetIndex];
 
-        // Apply interaction rules
-        simulation.interactionRules.Clear();
-        foreach (var serializedRule in preset.interactionRules)
+            // Apply simulation settings
+            simulation.simulationSpeed = preset.simulationSpeed;
+            simulation.collisionElasticity = preset.collisionElasticity;
+            simulation.simulationBounds = preset.simulationBounds;
+            simulation.dampening = preset.dampening;
+            simulation.interactionStrength = preset.interactionStrength;
+            simulation.minDistance = preset.minDistance;
+            simulation.bounceForce = preset.bounceForce;
+            simulation.maxForce = preset.maxForce;
+            simulation.maxVelocity = preset.maxVelocity;
+            simulation.interactionRadius = preset.interactionRadius;
+            simulation.cellSize = preset.cellSize;
+
+            // Apply particle types
+            simulation.particleTypes.Clear();
+            foreach (var serializedType in preset.particleTypes)
+            {
+                simulation.particleTypes.Add(serializedType.ToParticleType());
+            }
+
+            // Apply interaction rules
+            simulation.interactionRules.Clear();
+            foreach (var serializedRule in preset.interactionRules)
+            {
+                simulation.interactionRules.Add(serializedRule.ToInteractionRule());
+            }
+
+            // Reset simulation to apply changes
+            if (Application.isPlaying)
+            {
+                simulation.RequestReset();
+            }
+
+            Debug.Log("Preset loaded: " + preset.name);
+        }
+        catch (Exception e)
         {
-            simulation.interactionRules.Add(serializedRule.ToInteractionRule());
+            Debug.LogError("Error loading preset: " + e.Message);
         }
-
-        // Reset simulation to apply changes
-        if (Application.isPlaying)
-        {
-            simulation.RequestReset();
-        }
-
-        Debug.Log("Preset loaded: " + preset.name);
     }
 
     /// <summary>
